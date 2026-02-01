@@ -1,0 +1,62 @@
+version: '3.9'
+
+services:
+  # 1. База данных
+  db:
+    image: postgres:15-alpine
+    restart: always
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "5432:5432" # Чтобы вы могли подключаться к базе с компьютера
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # 2. Бэкенд (FastAPI)
+  backend:
+    build: ./backend
+    container_name: wb_backend
+    restart: always
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - ./backend/app:/app/app # "Живое" обновление кода без перезагрузки
+    ports:
+      - "8000:8000"
+    env_file: .env
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # 3. Фронтенд (Streamlit)
+  frontend:
+    build: ./frontend
+    container_name: wb_frontend
+    restart: always
+    command: streamlit run app.py
+    volumes:
+      - ./frontend:/app # "Живое" обновление кода
+    ports:
+      - "8501:8501"
+    env_file: .env
+    depends_on:
+      - backend
+
+  bot:
+    build: ./bot
+    container_name: wb_bot
+    restart: always
+    env_file: .env
+    environment:
+      - BACKEND_URL=http://backend:8000 # Бот будет стучаться сюда
+    depends_on:
+      - backend
+      
+volumes:
+  postgres_data:
