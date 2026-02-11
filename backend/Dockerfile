@@ -10,4 +10,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Порт, который слушает контейнер
-EXPOSE 8000
+EXPOSE 8111

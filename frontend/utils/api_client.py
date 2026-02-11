@@ -3,7 +3,7 @@ import requests
 from typing import List, Dict, Any, Optional
 import streamlit as st
 
-BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8000")
+BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8111")
 
 class APIClient:
     """Класс для взаимодействия с Бэкендом через REST API."""

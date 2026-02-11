@@ -11,7 +11,7 @@ logging.basicConfig(level=logging.INFO)
 
 TG_TOKEN = os.getenv("TG_BOT_TOKEN")
 ADMIN_ID = os.getenv("TG_ADMIN_ID")
-BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8000")
+BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8111")
 
 bot = Bot(token=TG_TOKEN)
 dp = Dispatcher()

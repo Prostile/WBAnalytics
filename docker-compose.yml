@@ -24,11 +24,11 @@ services:
     build: ./backend
     container_name: wb_backend
     restart: always
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8111 --reload
     volumes:
       - ./backend/app:/app/app # "Живое" обновление кода без перезагрузки
     ports:
-      - "8000:8000"
+      - "8000:8111"
     env_file: .env
     depends_on:
       db:
@@ -54,7 +54,7 @@ services:
     restart: always
     env_file: .env
     environment:
-      - BACKEND_URL=http://backend:8000 # Бот будет стучаться сюда
+      - BACKEND_URL=http://backend:8111 # Бот будет стучаться сюда
     depends_on:
       - backend
       

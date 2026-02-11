@@ -4,6 +4,9 @@ from app.services import unit_economics, notifier
 from app.wb_client import wb
 import asyncio
 import aiohttp
+import os
+
+BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8111")
 
 # --- СТАРЫЕ ЗАДАЧИ (ЦЕНЫ) ---
 async def check_prices_job():
@@ -56,7 +59,7 @@ async def sync_finance_job():
     async with aiohttp.ClientSession() as session:
         try:
             # Бэкенд стучится в свой же API (localhost)
-            async with session.post("http://127.0.0.1:8000/analytics/sync_finance", json={"days": 7}) as resp:
+            async with session.post("f{BACKEND_URL}/analytics/sync_finance", json={"days": 7}) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     print(f"✅ [Scheduler] Отчет V5 обновлен! Строк: {data.get('total_found', 0)}")
@@ -70,7 +73,7 @@ async def sync_items_job():
     print("🔄 [Scheduler] Фоновое обновление номенклатуры WB...")
     async with aiohttp.ClientSession() as session:
         try:
-            async with session.post("http://127.0.0.1:8000/items/import_from_wb") as resp:
+            async with session.post("f{BACKEND_URL}/items/import_from_wb") as resp:
                 if resp.status == 200:
                     print("✅ [Scheduler] Номенклатура актуальна.")
                 else:
