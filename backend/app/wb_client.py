@@ -7,7 +7,7 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 class WBClient:
-    
+
     def __init__(self):
         self.token = os.getenv("WB_API_TOKEN")
         self.headers = {
@@ -51,19 +51,28 @@ class WBClient:
     def get_cards(self):
         url = "https://content-api.wildberries.ru/content/v2/get/cards/list"
         payload = {"settings": {"cursor": {"limit": 100}, "filter": {"withPhoto": -1}}}
-        # Content API работает через POST и возвращает структуру { "cards": [...] }
+        
         data = self._make_request("POST", url, json=payload)
         
-        # Парсим ответ
         if isinstance(data, dict):
             raw_cards = data.get("cards", [])
             cleaned = []
             for c in raw_cards:
                 photos = c.get("photos", [])
+                
+                # --- УЛУЧШЕНИЕ: Ищем название ---
+                # WB хранит название в поле 'title' или 'subjectName'
+                # Если название пустое, соберем его из Бренда + Предмета
+                title = c.get("title") or ""
+                if not title:
+                    brand = c.get("brand", "")
+                    subject = c.get("subjectName", "Товар")
+                    title = f"{subject} {brand}".strip()
+                    
                 cleaned.append({
                     "nm_id": c.get("nmID"),
                     "vendor_code": c.get("vendorCode"),
-                    "name": c.get("subjectName", "Товар"),
+                    "name": title, # <-- Теперь здесь нормальное имя
                     "photo_url": photos[0].get("big") if photos else None
                 })
             return cleaned

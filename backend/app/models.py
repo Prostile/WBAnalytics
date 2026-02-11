@@ -16,8 +16,8 @@ class Item(Base):
     min_price = Column(Float, default=0.0)       # Минимальная цена (чтобы не уйти в минус)
     
     # --- НАСТРОЙКИ РАСЧЕТА (INPUTS - Вводите вы или берем среднее) ---
-    tax_rate = Column(Float, default=0.07)       # Налог (0.07 = 7%)
-    wb_commission = Column(Float, default=0.25)  # Комиссия WB (0.25 = 25%)
+    tax_rate = Column(Float, default=0.06)       # Налог (0.07 = 7%)
+    wb_commission = Column(Float, default=0.26)  # Комиссия WB (0.25 = 25%)
     logistics_cost = Column(Float, default=50.0) # Логистика на 1 шт (базовая)
     
     # --- ДАННЫЕ С WB (LIVE) ---

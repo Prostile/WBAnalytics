@@ -10,7 +10,8 @@ from .services import unit_economics
 # --- ИМПОРТЫ ДЛЯ SCHEDULER ---
 from contextlib import asynccontextmanager
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from app.services.scheduler import check_prices_job
+from apscheduler.triggers.cron import CronTrigger
+from app.services.scheduler import check_prices_job, sync_finance_job, sync_items_job
 
 # Создаем планировщик
 scheduler = AsyncIOScheduler()
@@ -18,18 +19,26 @@ scheduler = AsyncIOScheduler()
 # Оборачиваем старт приложения
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 1. СОЗДАЕМ ТАБЛИЦЫ В БД (ЭТОГО НЕ ХВАТАЛО!)
-    print("📦 Создаем таблицы в БД...")
+    print("📦 Инициализация БД...")
     await database.init_db()
     
-    # 2. ЗАПУСКАЕМ ПЛАНИРОВЩИК
-    print("🟢 Запуск Планировщика Цен...")
-    scheduler.add_job(check_prices_job, 'interval', minutes=30)
+    print("🟢 Запуск Планировщика Фоновых Задач...")
+    
+    # 1. Проверка цен: каждые 60 минут
+    scheduler.add_job(check_prices_job, 'interval', minutes=60)
+    
+    # 2. Обновление карточек товаров: каждые 6 часов
+    scheduler.add_job(sync_items_job, 'interval', hours=6)
+    
+    # 3. Ночная выгрузка финансов (V5): каждый день в 03:00 ночи
+    # Используем cron для точного времени
+    scheduler.add_job(sync_finance_job, CronTrigger(hour=3, minute=0))
+    
     scheduler.start()
     
-    yield # Работа приложения
+    yield
     
-    print("🔴 Остановка...")
+    print("🔴 Остановка Планировщика...")
     scheduler.shutdown()
 
 app = FastAPI(lifespan=lifespan)
@@ -326,6 +335,7 @@ async def get_finance_dashboard(db: AsyncSession = Depends(database.get_db)):
                 "type": r.oper_type, 
                 "item": r.nm_id, 
                 "amount": r.amount,
+                "retail_amount": r.retail_amount,
                 "logistics": r.delivery_rub
             } 
             for r in sales_rows + logistics_rows
@@ -334,60 +344,48 @@ async def get_finance_dashboard(db: AsyncSession = Depends(database.get_db)):
 
 @app.get("/repricer/status")
 async def get_repricer_status(db: AsyncSession = Depends(database.get_db)):
-    result = await db.execute(select(models.Item).filter(models.Item.is_active))
+    result = await db.execute(select(models.Item).filter(models.Item.is_active == True))
     items = result.scalars().all()
     
     report = []
     
     for item in items:
-        # Считаем математику
+        # 1. Математика (Считаем идеальную цену)
         optimal = unit_economics.calculate_optimal_price(
             target_profit=item.target_profit,
             cost_price=item.cost_price,
             logistics=item.logistics_cost,
             tax_rate=item.tax_rate,
             commission=item.wb_commission,
-            current_discount=item.wb_discount # <--- ВАЖНО: Используем текущую скидку карты!
+            current_discount=item.wb_discount
         )
         
-        # Считаем текущую чистую прибыль
-        current_price = item.wb_price_final # Цена клиента
+        # 2. Текущая прибыль (Факт)
         current_profit = (
-            current_price 
+            item.wb_price_final 
             - item.cost_price 
             - item.logistics_cost 
-            - (current_price * item.wb_commission) 
-            - (current_price * item.tax_rate)
+            - (item.wb_price_final * item.wb_commission) 
+            - (item.wb_price_final * item.tax_rate)
         )
         
-        # --- ФИКС ЗДЕСЬ ---
-        # Нам нужно отправить на WB "Высокую цену" (Retail), 
-        # чтобы после скидки получилась "Финальная" (Final).
-        
-        # Если скидки нет, то Retail = Final
-        rec_retail = optimal.get("recommended_retail_price") 
-        rec_final = optimal.get("recommended_final_price")
-
+        # 3. Формируем ответ
         report.append({
             "nm_id": item.nm_id,
-            "vendor_code": item.vendor_code,
+            "name": item.name, # Добавили имя
             "photo_url": item.photo_url,
             "mode": item.repricer_mode,
-            "wb_discount": item.wb_discount, # Передаем скидку на фронт, чтобы видеть её
+            "wb_discount": item.wb_discount,
             
-            # ФАКТ
-            "current_price": current_price,
+            # ВАЖНО: Добавили текущую базовую цену (которая зачеркнута)
+            "current_price_retail": item.wb_price_base, 
+            
+            "current_price": item.wb_price_final,
             "current_profit": round(current_profit, 0),
-            
-            # ПЛАН
             "target_profit": item.target_profit,
             
-            # --- ИСПРАВЛЕНИЕ: Передаем ОБЕ цены ---
-            "recommended_price_retail": rec_retail, # Эту отправим на WB (например 12000)
-            "recommended_price_final": rec_final,   # Эту увидит клиент (например 6200)
-            
-            # Diff считаем по финальной цене (чтобы понимать масштаб изменений для клиента)
-            "diff_price": rec_final - current_price,
+            "recommended_price_final": optimal.get("recommended_final_price"),
+            "recommended_price_retail": optimal.get("recommended_retail_price"),
             
             "status": "OK" if abs(item.target_profit - current_profit) < 100 else "⚠️ MISMATCH"
         })

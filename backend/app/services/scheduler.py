@@ -3,69 +3,77 @@ from app import models, database
 from app.services import unit_economics, notifier
 from app.wb_client import wb
 import asyncio
+import aiohttp
 
+# --- СТАРЫЕ ЗАДАЧИ (ЦЕНЫ) ---
 async def check_prices_job():
-    print("⏰ [Scheduler] Запуск проверки цен...")
+    print("⏰ [Scheduler] Проверка маржинальности и цен...")
     
-    # Создаем новую сессию БД
     async with database.SessionLocal() as db:
-        result = await db.execute(select(models.Item).filter(models.Item.is_active))
+        result = await db.execute(select(models.Item).filter(models.Item.is_active == True))
         items = result.scalars().all()
         
-        updates_batch = [] # Для авто-режима (чтобы отправить пачкой)
+        manual_alerts_batch = []
+        auto_updates_batch = []
         
         for item in items:
-            # 1. Считаем математику
             optimal = unit_economics.calculate_optimal_price(
-                target_profit=item.target_profit,
-                cost_price=item.cost_price,
-                logistics=item.logistics_cost,
-                tax_rate=item.tax_rate,
-                commission=item.wb_commission,
-                current_discount=item.wb_discount
+                target_profit=item.target_profit, cost_price=item.cost_price,
+                logistics=item.logistics_cost, tax_rate=item.tax_rate,
+                commission=item.wb_commission, current_discount=item.wb_discount
             )
-            
             rec_retail = optimal.get("recommended_retail_price", 0)
             
-            # 2. Считаем текущую прибыль
             current_profit = (
-                item.wb_price_final 
-                - item.cost_price 
-                - item.logistics_cost 
-                - (item.wb_price_final * item.wb_commission) 
-                - (item.wb_price_final * item.tax_rate)
+                item.wb_price_final - item.cost_price - item.logistics_cost - 
+                (item.wb_price_final * item.wb_commission) - (item.wb_price_final * item.tax_rate)
             )
             
-            # 3. Проверяем отклонение (например, если цель не выполняется на > 100 руб)
-            diff = item.target_profit - current_profit
-            
-            if diff > 100 and rec_retail > 0:
-                print(f"❗ {item.name}: Теряем {diff} руб. Режим: {item.repricer_mode}")
-                
-                # РЕЖИМ: MANUAL
+            if item.target_profit - current_profit > 100 and rec_retail > 0:
                 if item.repricer_mode == 'manual':
-                    # Шлем кнопку в ТГ
-                    await notifier.send_manual_alert(
-                        item_name=item.name or str(item.nm_id),
-                        current_profit=int(current_profit),
-                        target_profit=int(item.target_profit),
-                        new_price=int(rec_retail),
-                        nm_id=item.nm_id
-                    )
-                
-                # РЕЖИМ: AUTO
+                    manual_alerts_batch.append({
+                        "name": item.name or str(item.nm_id),
+                        "profit": int(current_profit), "target": int(item.target_profit),
+                        "new_price": int(rec_retail), "nm_id": item.nm_id
+                    })
                 elif item.repricer_mode == 'auto':
-                    # Добавляем в список на обновление
-                    updates_batch.append({"nmID": item.nm_id, "price": int(rec_retail)})
-                    
-                    # Шлем отчет
-                    await notifier.send_auto_report(
-                        item_name=item.name, 
-                        old_price=int(item.wb_price_base), 
-                        new_price=int(rec_retail)
-                    )
-        
-        # Если есть авто-обновления - отправляем их в WB
-        if updates_batch:
-            print(f"🚀 AUTO: Обновляем {len(updates_batch)} товаров...")
-            wb.update_prices(updates_batch)
+                    auto_updates_batch.append({"nmID": item.nm_id, "price": int(rec_retail)})
+
+        if manual_alerts_batch:
+            print(f"📢 Отправляем сводку в ТГ ({len(manual_alerts_batch)} товаров)")
+            await notifier.send_batch_alert(manual_alerts_batch)
+            
+        if auto_updates_batch:
+            print(f"🚀 AUTO: Обновляем цены на WB ({len(auto_updates_batch)} товаров)")
+            wb.update_prices(auto_updates_batch)
+
+
+# --- НОВЫЕ ЗАДАЧИ (СИНХРОНИЗАЦИЯ ДАННЫХ) ---
+
+async def sync_finance_job():
+    """Ночная задача: скачивает отчет V5 за последние 7 дней для актуализации."""
+    print("🌙 [Scheduler] Ночная выгрузка отчета V5...")
+    async with aiohttp.ClientSession() as session:
+        try:
+            # Бэкенд стучится в свой же API (localhost)
+            async with session.post("http://127.0.0.1:8000/analytics/sync_finance", json={"days": 7}) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    print(f"✅ [Scheduler] Отчет V5 обновлен! Строк: {data.get('total_found', 0)}")
+                else:
+                    print(f"❌ [Scheduler] Ошибка выгрузки V5: {await resp.text()}")
+        except Exception as e:
+            print(f"💥 [Scheduler] Ошибка соединения: {e}")
+
+async def sync_items_job():
+    """Задача: обновляет базу товаров (новые карточки, фото, названия)."""
+    print("🔄 [Scheduler] Фоновое обновление номенклатуры WB...")
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.post("http://127.0.0.1:8000/items/import_from_wb") as resp:
+                if resp.status == 200:
+                    print("✅ [Scheduler] Номенклатура актуальна.")
+                else:
+                    print(f"❌ [Scheduler] Ошибка импорта товаров: {await resp.text()}")
+        except Exception as e:
+            print(f"💥 [Scheduler] Ошибка соединения: {e}")
