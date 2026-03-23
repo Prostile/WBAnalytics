@@ -150,7 +150,38 @@ async def check_prices_manual(message: Message):
 @dp.message(F.text == "⚙️ Статус")
 async def check_status(message: Message):
     if not is_admin(message.from_user.id): return
-    await message.answer("🟢 Система работает в штатном режиме.\nФоновые задачи активны.")
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{BACKEND_URL}/repricer/automation_status") as resp:
+                if resp.status != 200:
+                    await message.answer("⚠️ Не удалось получить статус фоновой оптимизации.")
+                    return
+
+                data = await resp.json()
+                last_run = data.get("last_run") or {}
+                finished_at_raw = last_run.get("finished_at") or last_run.get("started_at")
+                finished_at = "еще не запускался"
+                if finished_at_raw:
+                    try:
+                        finished_at = datetime.fromisoformat(finished_at_raw.replace("Z", "+00:00")).strftime("%d.%m %H:%M")
+                    except ValueError:
+                        finished_at = finished_at_raw
+
+                text = (
+                    "🟢 <b>Статус системы</b>\n\n"
+                    f"Последний запуск: <b>{finished_at}</b>\n"
+                    f"Статус цикла: <b>{last_run.get('status', 'unknown')}</b>\n"
+                    f"Активных товаров: <b>{data.get('active_items', 0)}</b>\n"
+                    f"В авто-режиме: <b>{data.get('auto_mode_items', 0)}</b>\n"
+                    f"Готово к авто: <b>{data.get('auto_ready_items', 0)}</b>\n"
+                    f"Ждут коррекции: <b>{data.get('pending_auto_items', 0)}</b>\n"
+                    f"Ручной разбор: <b>{data.get('manual_review_items', 0)}</b>\n"
+                    f"Изменено в последнем цикле: <b>{last_run.get('changed_items', 0)}</b>"
+                )
+                await message.answer(text, parse_mode="HTML")
+    except Exception as e:
+        await message.answer(f"💥 Ошибка получения статуса: {e}")
 
 # --- 5. ОБРАБОТКА КНОПОК ПРИМЕНЕНИЯ ЦЕН ---
 @dp.callback_query(F.data.startswith("set_price"))
@@ -164,7 +195,7 @@ async def process_price_update(callback: CallbackQuery):
     
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(f"{BACKEND_URL}/repricer/batch_update", json=payload) as resp:
+            async with session.post(f"{BACKEND_URL}/repricer/batch_update?source=manual_bot", json=payload) as resp:
                 if resp.status == 200:
                     await callback.message.edit_text(
                         text=f"{callback.message.text}\n\n✅ <b>УСПЕШНО!</b> Цена изменена на {price} ₽",

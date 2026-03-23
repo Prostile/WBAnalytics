@@ -5,7 +5,7 @@ from sqlalchemy import select, func
 from typing import List
 
 from . import models, schemas, database, wb_client
-from .services import repricer
+from .services import notifier, repricer
 
 # --- ИМПОРТЫ ДЛЯ SCHEDULER ---
 from contextlib import asynccontextmanager
@@ -345,6 +345,43 @@ async def get_finance_dashboard(db: AsyncSession = Depends(database.get_db)):
 @app.get("/repricer/status")
 async def get_repricer_status(db: AsyncSession = Depends(database.get_db)):
     return await repricer.build_repricer_report(db, active_only=True)
+
+
+@app.get("/repricer/automation_status")
+async def get_repricer_automation_status(db: AsyncSession = Depends(database.get_db)):
+    return await repricer.get_automation_status(db)
+
+
+@app.get("/repricer/history")
+async def get_repricer_history(limit: int = 20, db: AsyncSession = Depends(database.get_db)):
+    safe_limit = max(1, min(limit, 100))
+    return {"events": await repricer.get_recent_events(db, limit=safe_limit)}
+
+
+@app.post("/repricer/run_auto_now")
+async def run_auto_now(db: AsyncSession = Depends(database.get_db)):
+    try:
+        result = await repricer.run_background_repricing(db, source="manual_trigger")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    manual_alerts_batch = [
+        {
+            "name": item["name"] or str(item["nm_id"]),
+            "profit": int(item["current_profit"]),
+            "target": int(item["target_profit"]),
+            "new_price": int(item["recommended_price_retail"]),
+            "nm_id": item["nm_id"],
+        }
+        for item in result["manual_alerts"]
+    ]
+
+    if manual_alerts_batch:
+        await notifier.send_batch_alert(manual_alerts_batch)
+    if result["changes"]:
+        await notifier.send_auto_report(result)
+
+    return result
 
 @app.post("/repricer/batch_update")
 async def batch_update_prices(

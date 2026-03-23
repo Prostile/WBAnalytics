@@ -1,5 +1,5 @@
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List
 
 from sqlalchemy import select
@@ -56,6 +56,54 @@ def _rounded_floor_price(price: float) -> int:
 
 def _reason_label(code: str | None) -> str:
     return REASON_LABELS.get(code or "", code or "")
+
+
+def _serialize_dt(value: datetime | None) -> str | None:
+    return value.isoformat() if value else None
+
+
+def _serialize_run(run: models.RepricerRun | None) -> Dict[str, Any] | None:
+    if not run:
+        return None
+
+    return {
+        "id": run.id,
+        "source": run.source,
+        "status": run.status,
+        "started_at": _serialize_dt(run.started_at),
+        "finished_at": _serialize_dt(run.finished_at),
+        "checked_items": run.checked_items,
+        "eligible_items": run.eligible_items,
+        "changed_items": run.changed_items,
+        "skipped_items": run.skipped_items,
+        "manual_items": run.manual_items,
+        "price_sync_items": run.price_sync_items,
+        "error_message": run.error_message,
+        "next_run_at": _serialize_dt(run.started_at + timedelta(hours=1)) if run.started_at else None,
+    }
+
+
+def _serialize_event(event: models.RepricerEvent) -> Dict[str, Any]:
+    return {
+        "id": event.id,
+        "run_id": event.run_id,
+        "nm_id": event.nm_id,
+        "item_name": event.item_name,
+        "source": event.source,
+        "reason": event.reason,
+        "reason_label": _reason_label(event.reason),
+        "old_price_retail": event.old_price_retail,
+        "new_price_retail": event.new_price_retail,
+        "old_price_final": event.old_price_final,
+        "new_price_final": event.new_price_final,
+        "old_profit": event.old_profit,
+        "new_profit": event.new_profit,
+        "target_profit": event.target_profit,
+        "wb_discount": event.wb_discount,
+        "price_delta": event.price_delta,
+        "price_delta_percent": event.price_delta_percent,
+        "created_at": _serialize_dt(event.created_at),
+    }
 
 
 def build_item_decision(item: models.Item) -> Dict[str, Any]:
@@ -390,3 +438,42 @@ async def run_background_repricing(db: AsyncSession, source: str = "scheduler_ho
             failed_run.error_message = str(exc)
             await db.commit()
         raise
+
+
+async def get_recent_events(
+    db: AsyncSession,
+    *,
+    limit: int = 20,
+    source: str | None = None,
+) -> List[Dict[str, Any]]:
+    query = select(models.RepricerEvent).order_by(models.RepricerEvent.created_at.desc(), models.RepricerEvent.id.desc())
+    if source:
+        query = query.filter(models.RepricerEvent.source == source)
+
+    result = await db.execute(query.limit(limit))
+    events = result.scalars().all()
+    return [_serialize_event(event) for event in events]
+
+
+async def get_automation_status(db: AsyncSession) -> Dict[str, Any]:
+    run_result = await db.execute(
+        select(models.RepricerRun).order_by(models.RepricerRun.started_at.desc(), models.RepricerRun.id.desc()).limit(1)
+    )
+    last_run = run_result.scalars().first()
+
+    report = await build_repricer_report(db, active_only=True)
+    auto_mode_items = [row for row in report if row["mode"] == "auto"]
+    auto_ready_items = [row for row in report if row["auto_ready"]]
+    pending_auto_items = [row for row in report if row["should_auto_update"]]
+    manual_review_items = [row for row in report if row["needs_manual_action"]]
+
+    return {
+        "schedule_interval_minutes": 60,
+        "active_items": len(report),
+        "auto_mode_items": len(auto_mode_items),
+        "auto_ready_items": len(auto_ready_items),
+        "pending_auto_items": len(pending_auto_items),
+        "manual_review_items": len(manual_review_items),
+        "last_run": _serialize_run(last_run),
+        "recent_changes": await get_recent_events(db, limit=5, source="scheduler_hourly"),
+    }

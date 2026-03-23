@@ -1,9 +1,14 @@
 import os
+from html import escape
 from aiogram import Bot
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 TG_TOKEN = os.getenv("TG_BOT_TOKEN")
 ADMIN_ID = os.getenv("TG_ADMIN_ID")
+
+
+def _rub(value: float) -> str:
+    return f"{int(round(value)):,} ₽".replace(",", " ")
 
 async def send_batch_alert(items: list):
     """
@@ -21,9 +26,9 @@ async def send_batch_alert(items: list):
     max_show = 5
     for i, item in enumerate(items[:max_show]):
         text += (
-            f"🔹 <b>{item['name']}</b>\n"
-            f"   Прибыль: {item['profit']} ₽ (Цель: {item['target']})\n"
-            f"   ⬇️ Реком. цена: <b>{item['new_price']} ₽</b>\n\n"
+            f"🔹 <b>{escape(item['name'])}</b>\n"
+            f"   Прибыль: {_rub(item['profit'])} (Цель: {_rub(item['target'])})\n"
+            f"   ⬇️ Реком. цена: <b>{_rub(item['new_price'])}</b>\n\n"
         )
     
     if len(items) > max_show:
@@ -48,18 +53,46 @@ async def send_batch_alert(items: list):
         await bot.session.close()
 
 async def send_auto_report(run_result: dict):
-    """Базовая сводка по авто-коррекциям. Детализация будет расширяться отдельно."""
     changes = run_result.get("changes", [])
     if not TG_TOKEN or not ADMIN_ID or not changes:
         return
 
-    total_delta = sum(int(change.get("price_delta", 0)) for change in changes)
-    text = (
-        f"🤖 <b>Фоновая оптимизация завершена</b>\n\n"
-        f"Проверено товаров: <b>{run_result.get('checked_items', 0)}</b>\n"
-        f"Изменено: <b>{len(changes)}</b>\n"
-        f"Суммарная дельта цен: <b>{total_delta:+,} ₽</b>"
-    )
+    total_delta = sum(float(change.get("price_delta", 0) or 0) for change in changes)
+    text_lines = [
+        "🤖 <b>Фоновая оптимизация завершена</b>",
+        "",
+        f"Проверено товаров: <b>{run_result.get('checked_items', 0)}</b>",
+        f"Авто-готово: <b>{run_result.get('eligible_items', 0)}</b>",
+        f"Изменено: <b>{len(changes)}</b>",
+        f"На ручной разбор: <b>{run_result.get('manual_items', 0)}</b>",
+        f"Цены с WB обновлены у: <b>{run_result.get('price_sync_items', 0)}</b>",
+        f"Суммарная дельта цен: <b>{_rub(total_delta)}</b>",
+        "",
+        "<b>Что изменилось:</b>",
+    ]
+
+    max_show = 7
+    for change in changes[:max_show]:
+        direction = "⬆️" if float(change.get("price_delta", 0) or 0) >= 0 else "⬇️"
+        text_lines.extend(
+            [
+                f"{direction} <b>{escape(change['name'])}</b>",
+                (
+                    f"{_rub(change['old_price_retail'])} → <b>{_rub(change['new_price_retail'])}</b> "
+                    f"({change['price_delta']:+.0f} ₽ / {change['price_delta_percent']:+.1f}%)"
+                ),
+                (
+                    f"Прибыль: {_rub(change['old_profit'])} → {_rub(change['new_profit'])} "
+                    f"(цель {_rub(change['target_profit'])})"
+                ),
+                "",
+            ]
+        )
+
+    if len(changes) > max_show:
+        text_lines.append(f"<i>...и еще {len(changes) - max_show} товаров.</i>")
+
+    text = "\n".join(text_lines).strip()
 
     bot = Bot(token=TG_TOKEN)
     try:
@@ -78,7 +111,7 @@ async def send_job_error(job_name: str, error_message: str):
     try:
         await bot.send_message(
             chat_id=ADMIN_ID,
-            text=f"💥 <b>{job_name}</b>\n\n<code>{error_message}</code>",
+            text=f"💥 <b>{escape(job_name)}</b>\n\n<code>{escape(error_message)}</code>",
             parse_mode="HTML",
         )
     except Exception as e:
