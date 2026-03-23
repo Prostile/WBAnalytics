@@ -9,9 +9,9 @@ class APIClient:
     """Класс для взаимодействия с Бэкендом через REST API."""
     
     @staticmethod
-    def _get(endpoint: str, params: Optional[Dict[str, Any]] = None) -> Any:
+    def _get(endpoint: str, params: Optional[Dict[str, Any]] = None, timeout: int = 15) -> Any:
         try:
-            response = requests.get(f"{BACKEND_URL}{endpoint}", params=params, timeout=15)
+            response = requests.get(f"{BACKEND_URL}{endpoint}", params=params, timeout=timeout)
             response.raise_for_status()
             return response.json()
         except requests.RequestException as e:
@@ -19,9 +19,14 @@ class APIClient:
             return None
 
     @staticmethod
-    def _post(endpoint: str, json_data: Optional[Any] = None) -> Any:
+    def _post(
+        endpoint: str,
+        json_data: Optional[Any] = None,
+        params: Optional[Dict[str, Any]] = None,
+        timeout: int = 60,
+    ) -> Any:
         try:
-            response = requests.post(f"{BACKEND_URL}{endpoint}", json=json_data, timeout=60)
+            response = requests.post(f"{BACKEND_URL}{endpoint}", json=json_data, params=params, timeout=timeout)
             response.raise_for_status()
             return response.json()
         except requests.RequestException as e:
@@ -47,8 +52,20 @@ class APIClient:
         return cls._get("/repricer/status") or []
 
     @classmethod
-    def batch_update_prices(cls, updates: List[Dict[str, int]]) -> bool:
-        return cls._post("/repricer/batch_update", json_data=updates) is not None
+    def batch_update_prices(cls, updates: List[Dict[str, int]], source: str = "manual_ui") -> bool:
+        return cls._post("/repricer/batch_update", json_data=updates, params={"source": source}) is not None
+
+    @classmethod
+    def get_automation_status(cls) -> Dict[str, Any]:
+        return cls._get("/repricer/automation_status") or {}
+
+    @classmethod
+    def get_repricer_history(cls, limit: int = 20) -> Dict[str, Any]:
+        return cls._get("/repricer/history", params={"limit": limit}) or {"events": []}
+
+    @classmethod
+    def run_auto_now(cls) -> Dict[str, Any]:
+        return cls._post("/repricer/run_auto_now", timeout=120) or {}
 
     # --- ANALYTICS (Финансы) ---
     @classmethod

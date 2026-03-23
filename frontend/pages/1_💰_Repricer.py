@@ -12,20 +12,35 @@ st.set_page_config(page_title="Умный Репрайсер", page_icon="💰",
 
 st.title("💰 Умный Репрайсер")
 
-col_refresh, col_apply, col_spacer = st.columns([1, 1, 3])
+col_refresh, col_run, col_apply, col_spacer = st.columns([1, 1, 1, 2])
 
 with col_refresh:
     if st.button("🔄 Обновить данные", use_container_width=True):
         st.rerun()
 
+with col_run:
+    if st.button("▶️ Запустить авто-цикл", use_container_width=True):
+        with st.spinner("Запускаю фоновую оптимизацию..."):
+            result = APIClient.run_auto_now()
+            if result:
+                st.success(
+                    f"Цикл завершен. Проверено {result.get('checked_items', 0)} товаров, изменено {result.get('changed_items', 0)}."
+                )
+                time.sleep(1.2)
+                st.rerun()
+
 # --- 1. ЗАГРУЗКА И ПОДГОТОВКА ДАННЫХ ---
 items_data = APIClient.get_repricer_status()
+automation_status = APIClient.get_automation_status()
+history_payload = APIClient.get_repricer_history(limit=25)
+history_data = history_payload.get("events", [])
 
 if not items_data:
     st.info("Нет данных для отображения.")
     st.stop()
 
 df = pd.DataFrame(items_data)
+selected = []
 
 # Считаем визуальную дельту (процент изменения цены)
 def calculate_delta(row):
@@ -40,8 +55,30 @@ def calculate_delta(row):
 
 df['price_delta'] = df.apply(calculate_delta, axis=1)
 
+last_run = automation_status.get("last_run") or {}
+last_run_at = last_run.get("finished_at") or last_run.get("started_at") or "Еще не запускался"
+if last_run_at != "Еще не запускался":
+    try:
+        last_run_at = pd.to_datetime(last_run_at).strftime("%d.%m.%Y %H:%M")
+    except Exception:
+        pass
+
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("Последний запуск", last_run_at)
+m2.metric("Ждут авто-коррекции", automation_status.get("pending_auto_items", 0))
+m3.metric("В ручном разборе", automation_status.get("manual_review_items", 0))
+m4.metric("Изменено в цикле", last_run.get("changed_items", 0))
+
+if last_run.get("status") == "failed":
+    st.error(f"Последний фоновый цикл завершился ошибкой: {last_run.get('error_message', 'неизвестно')}")
+
 # --- 2. ПРЕСЕТЫ (ВИДЫ ОТОБРАЖЕНИЯ) ---
-tab_all, tab_bad, tab_auto = st.tabs(["📋 Все товары", "🔴 Требуют внимания", "🤖 На автопилоте"])
+tab_all, tab_bad, tab_auto, tab_setup = st.tabs([
+    "📋 Все товары",
+    "🔴 Требуют внимания",
+    "🤖 На автопилоте",
+    "⚪ Не готовы к авто",
+])
 
 def render_grid(dataframe, key_suffix):
     """Функция для отрисовки AgGrid с нужными настройками"""
@@ -53,13 +90,14 @@ def render_grid(dataframe, key_suffix):
     gb.configure_default_column(resizable=True, filterable=True, sortable=True)
 
     # Скрываем лишнее
-    for col in ["photo_url", "mode", "current_price_retail", "target_profit"]:
+    for col in ["photo_url", "current_price_retail"]:
         gb.configure_column(col, hide=True)
 
     # Настраиваем колонки с ПОДСКАЗКАМИ (headerTooltip)
     gb.configure_column("nm_id", header_name="Артикул", width=100, pinned='left')
     gb.configure_column("name", header_name="Товар", width=250, pinned='left', headerTooltip="Название из карточки WB")
-    
+    gb.configure_column("mode", header_name="Режим", width=95)
+    gb.configure_column("target_profit", header_name="Цель", type=["numericColumn"], valueFormatter="x.toLocaleString() + ' ₽'")
     gb.configure_column("wb_discount", header_name="Скидка продавца %", type=["numericColumn"], headerTooltip="Ваша скидка в личном кабинете WB")
     gb.configure_column("current_price", header_name="Сейчас (Клиент)", type=["numericColumn"], valueFormatter="x.toLocaleString() + ' ₽'", headerTooltip="Текущая цена для покупателя на сайте")
     gb.configure_column("current_profit", header_name="Прибыль (Факт)", type=["numericColumn"], valueFormatter="x.toLocaleString() + ' ₽'", headerTooltip="Чистая прибыль с одной штуки при текущей цене")
@@ -68,8 +106,9 @@ def render_grid(dataframe, key_suffix):
     gb.configure_column("recommended_price_final", header_name="Новая (Клиент)", type=["numericColumn"], valueFormatter="x.toLocaleString() + ' ₽'", headerTooltip="Цена для клиента, которая даст целевую прибыль")
     gb.configure_column("price_delta", header_name="Изменение", width=120, headerTooltip="На сколько процентов изменится базовая цена")
     gb.configure_column("recommended_price_retail", header_name="🚀 Отправим на WB", type=["numericColumn"], valueFormatter="x.toLocaleString() + ' ₽'", cellStyle={'backgroundColor': '#e8f4f8', 'fontWeight': 'bold'}, headerTooltip="Базовая цена до скидки. Именно её мы пошлем по API.")
-    
-    gb.configure_column("status", header_name="Статус")
+    gb.configure_column("projected_profit", header_name="Прибыль после", type=["numericColumn"], valueFormatter="x.toLocaleString() + ' ₽'")
+    gb.configure_column("reason_label", header_name="Комментарий", width=180)
+    gb.configure_column("status", header_name="Статус", width=120)
     
     gb.configure_selection(selection_mode="multiple", use_checkbox=True)
     grid_options = gb.build()
@@ -95,6 +134,13 @@ with tab_bad:
 
 with tab_auto:
     grid_auto = render_grid(df[df['mode'] == 'auto'], "auto")
+    if grid_auto and grid_auto['selected_rows'] is not None and len(grid_auto['selected_rows']) > 0:
+        selected = grid_auto['selected_rows']
+
+with tab_setup:
+    grid_setup = render_grid(df[df['auto_ready'] != True], "setup")
+    if grid_setup and grid_setup['selected_rows'] is not None and len(grid_setup['selected_rows']) > 0:
+        selected = grid_setup['selected_rows']
 
 # --- 3. ПРИМЕНЕНИЕ ИЗМЕНЕНИЙ ---
 with col_apply:
@@ -114,3 +160,34 @@ with col_apply:
                         st.rerun()
     else:
         st.button("✅ Применить (0 шт)", disabled=True, use_container_width=True)
+
+st.divider()
+st.subheader("🕘 История последних корректировок")
+if history_data:
+    history_df = pd.DataFrame(history_data)
+    history_df["created_at"] = pd.to_datetime(history_df["created_at"], errors="coerce").dt.strftime("%d.%m.%Y %H:%M")
+    history_df["old_price_retail"] = history_df["old_price_retail"].round(0)
+    history_df["new_price_retail"] = history_df["new_price_retail"].round(0)
+    history_df["old_profit"] = history_df["old_profit"].round(0)
+    history_df["new_profit"] = history_df["new_profit"].round(0)
+    history_df = history_df.rename(
+        columns={
+            "created_at": "Когда",
+            "item_name": "Товар",
+            "source": "Источник",
+            "old_price_retail": "Было",
+            "new_price_retail": "Стало",
+            "price_delta": "Δ цены",
+            "price_delta_percent": "Δ %",
+            "old_profit": "Прибыль до",
+            "new_profit": "Прибыль после",
+            "reason_label": "Причина",
+        }
+    )
+    st.dataframe(
+        history_df[["Когда", "Товар", "Источник", "Было", "Стало", "Δ цены", "Δ %", "Прибыль до", "Прибыль после", "Причина"]],
+        use_container_width=True,
+        hide_index=True,
+    )
+else:
+    st.info("История автокоррекций пока пуста.")

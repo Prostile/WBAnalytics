@@ -33,12 +33,29 @@ with col_import:
 
 # --- 2. ЗАГРУЗКА ДАННЫХ ---
 items_data = APIClient.get_items()
+repricer_status = APIClient.get_repricer_status()
+status_map = {item["nm_id"]: item for item in repricer_status}
 
 if not items_data:
     st.info("База пуста. Нажмите 'Импорт из Wildberries', чтобы загрузить ваши товары.")
     st.stop()
 
 df = pd.DataFrame(items_data)
+persist_columns = list(df.columns)
+
+df["auto_ready"] = df["nm_id"].map(lambda nm_id: "Да" if status_map.get(nm_id, {}).get("auto_ready") else "Нет")
+df["auto_reason"] = df["nm_id"].map(lambda nm_id: status_map.get(nm_id, {}).get("reason_label", "Нет данных"))
+
+active_items = int(df["is_active"].sum()) if "is_active" in df.columns else 0
+auto_mode_items = int((df["repricer_mode"] == "auto").sum()) if "repricer_mode" in df.columns else 0
+auto_ready_items = int((df["auto_ready"] == "Да").sum())
+
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("Товаров", len(df))
+m2.metric("Активных", active_items)
+m3.metric("В авто-режиме", auto_mode_items)
+m4.metric("Готово к авто", auto_ready_items)
+st.caption("Для участия в фоновой оптимизации товар должен быть активен, переведен в режим `auto`, иметь себестоимость, цель прибыли и актуальную цену WB.")
 
 # --- 3. НАСТРОЙКА AGGRID ДЛЯ РЕДАКТИРОВАНИЯ ---
 gb = GridOptionsBuilder.from_dataframe(df)
@@ -57,7 +74,6 @@ gb.configure_column("wb_price_base", hide=True)
 gb.configure_column("wb_discount", hide=True)
 gb.configure_column("wb_price_final", hide=True)
 gb.configure_column("updated_at", hide=True)
-gb.configure_column("is_active", hide=True)
 
 # Закрепляем неизменяемые поля (ID и Название)
 gb.configure_column("nm_id", header_name="Артикул WB", pinned='left', width=120)
@@ -71,6 +87,7 @@ gb.configure_column("wb_commission", header_name="Комиссия WB (0.25 = 25
 gb.configure_column("logistics_cost", header_name="Логистика (₽)", editable=True, type=["numericColumn"])
 gb.configure_column("tax_rate", header_name="Налог (0.07 = 7%)", editable=True, type=["numericColumn"])
 gb.configure_column("min_price", header_name="Мин. порог цены (₽)", editable=True, type=["numericColumn"])
+gb.configure_column("is_active", header_name="Активен", editable=True)
 
 # Выпадающий список для режима репрайсера
 gb.configure_column(
@@ -80,6 +97,8 @@ gb.configure_column(
     cellEditor='agSelectCellEditor', 
     cellEditorParams={'values': ['manual', 'auto']}
 )
+gb.configure_column("auto_ready", header_name="Готов к авто", editable=False, width=110)
+gb.configure_column("auto_reason", header_name="Комментарий", editable=False, width=220)
 
 grid_options = gb.build()
 
@@ -103,6 +122,7 @@ with col_save:
         # Получаем данные из отредактированной таблицы
         updated_df = grid_response['data']
         records = updated_df.to_dict(orient="records")
+        records = [{key: item.get(key) for key in persist_columns} for item in records]
         
         # Индикатор прогресса
         progress_bar = st.progress(0)
