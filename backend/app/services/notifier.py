@@ -47,7 +47,41 @@ async def send_batch_alert(items: list):
     finally:
         await bot.session.close()
 
-# send_auto_report оставляем как был, он нормальный
-async def send_auto_report(item_name: str, old_price: int, new_price: int):
-    # ... (код из прошлого урока) ...
-    pass
+async def send_auto_report(run_result: dict):
+    """Базовая сводка по авто-коррекциям. Детализация будет расширяться отдельно."""
+    changes = run_result.get("changes", [])
+    if not TG_TOKEN or not ADMIN_ID or not changes:
+        return
+
+    total_delta = sum(int(change.get("price_delta", 0)) for change in changes)
+    text = (
+        f"🤖 <b>Фоновая оптимизация завершена</b>\n\n"
+        f"Проверено товаров: <b>{run_result.get('checked_items', 0)}</b>\n"
+        f"Изменено: <b>{len(changes)}</b>\n"
+        f"Суммарная дельта цен: <b>{total_delta:+,} ₽</b>"
+    )
+
+    bot = Bot(token=TG_TOKEN)
+    try:
+        await bot.send_message(chat_id=ADMIN_ID, text=text, parse_mode="HTML")
+    except Exception as e:
+        print(f"Ошибка ТГ: {e}")
+    finally:
+        await bot.session.close()
+
+
+async def send_job_error(job_name: str, error_message: str):
+    if not TG_TOKEN or not ADMIN_ID:
+        return
+
+    bot = Bot(token=TG_TOKEN)
+    try:
+        await bot.send_message(
+            chat_id=ADMIN_ID,
+            text=f"💥 <b>{job_name}</b>\n\n<code>{error_message}</code>",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        print(f"Ошибка ТГ: {e}")
+    finally:
+        await bot.session.close()

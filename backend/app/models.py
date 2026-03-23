@@ -93,3 +93,42 @@ class FinanceRecord(Base):
     
     order_dt = Column(DateTime, nullable=True)
     sale_dt = Column(DateTime, nullable=True)
+
+
+class RepricerRun(Base):
+    __tablename__ = "repricer_runs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    source = Column(String, default="scheduler_hourly")
+    status = Column(String, default="running")
+    started_at = Column(DateTime(timezone=True), server_default=func.now())
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+    checked_items = Column(Integer, default=0)
+    eligible_items = Column(Integer, default=0)
+    changed_items = Column(Integer, default=0)
+    skipped_items = Column(Integer, default=0)
+    manual_items = Column(Integer, default=0)
+    price_sync_items = Column(Integer, default=0)
+    error_message = Column(String, nullable=True)
+
+
+class RepricerEvent(Base):
+    __tablename__ = "repricer_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    run_id = Column(Integer, ForeignKey("repricer_runs.id"), nullable=True)
+    nm_id = Column(Integer, ForeignKey("items.nm_id"))
+    item_name = Column(String, nullable=True)
+    source = Column(String, default="manual_ui")
+    reason = Column(String, nullable=True)
+    old_price_retail = Column(Float, default=0.0)
+    new_price_retail = Column(Float, default=0.0)
+    old_price_final = Column(Float, default=0.0)
+    new_price_final = Column(Float, default=0.0)
+    old_profit = Column(Float, default=0.0)
+    new_profit = Column(Float, default=0.0)
+    target_profit = Column(Float, default=0.0)
+    wb_discount = Column(Integer, default=0)
+    price_delta = Column(Float, default=0.0)
+    price_delta_percent = Column(Float, default=0.0)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())

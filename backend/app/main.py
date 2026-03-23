@@ -5,7 +5,7 @@ from sqlalchemy import select, func
 from typing import List
 
 from . import models, schemas, database, wb_client
-from .services import unit_economics
+from .services import repricer
 
 # --- ИМПОРТЫ ДЛЯ SCHEDULER ---
 from contextlib import asynccontextmanager
@@ -344,84 +344,29 @@ async def get_finance_dashboard(db: AsyncSession = Depends(database.get_db)):
 
 @app.get("/repricer/status")
 async def get_repricer_status(db: AsyncSession = Depends(database.get_db)):
-    result = await db.execute(select(models.Item).filter(models.Item.is_active == True))
-    items = result.scalars().all()
-    
-    report = []
-    
-    for item in items:
-        # 1. Математика (Считаем идеальную цену)
-        optimal = unit_economics.calculate_optimal_price(
-            target_profit=item.target_profit,
-            cost_price=item.cost_price,
-            logistics=item.logistics_cost,
-            tax_rate=item.tax_rate,
-            commission=item.wb_commission,
-            current_discount=item.wb_discount
-        )
-        
-        # 2. Текущая прибыль (Факт)
-        current_profit = (
-            item.wb_price_final 
-            - item.cost_price 
-            - item.logistics_cost 
-            - (item.wb_price_final * item.wb_commission) 
-            - (item.wb_price_final * item.tax_rate)
-        )
-        
-        # 3. Формируем ответ
-        report.append({
-            "nm_id": item.nm_id,
-            "name": item.name, # Добавили имя
-            "photo_url": item.photo_url,
-            "mode": item.repricer_mode,
-            "wb_discount": item.wb_discount,
-            
-            # ВАЖНО: Добавили текущую базовую цену (которая зачеркнута)
-            "current_price_retail": item.wb_price_base, 
-            
-            "current_price": item.wb_price_final,
-            "current_profit": round(current_profit, 0),
-            "target_profit": item.target_profit,
-            
-            "recommended_price_final": optimal.get("recommended_final_price"),
-            "recommended_price_retail": optimal.get("recommended_retail_price"),
-            
-            "status": "OK" if abs(item.target_profit - current_profit) < 100 else "⚠️ MISMATCH"
-        })
-        
-    return report
+    return await repricer.build_repricer_report(db, active_only=True)
 
 @app.post("/repricer/batch_update")
-async def batch_update_prices(items: List[schemas.PriceUpdateReq], db: AsyncSession = Depends(database.get_db)):
+async def batch_update_prices(
+    items: List[schemas.PriceUpdateReq],
+    source: str = "manual_ui",
+    db: AsyncSession = Depends(database.get_db),
+):
     """Принимает список новых цен и отправляет их в WB"""
-    
-    # 1. Готовим данные для WB
-    # WB API "upload/task" принимает: nmID, price (розничная)
-    wb_payload = [{"nmID": item.nm_id, "price": int(item.new_price)} for item in items]
-    
-    if not wb_payload:
+
+    if not items:
         return {"status": "empty"}
 
-    # 2. Отправляем в WB
-    success = wb_client.wb.update_prices(wb_payload)
-    
-    if not success:
-        raise HTTPException(status_code=500, detail="Не удалось обновить цены на WB")
-    
-    # 3. Обновляем локальную базу (чтобы мы сразу видели изменения, не ждали синхронизации)
-    count = 0
-    for item in items:
-        db_item = await db.execute(select(models.Item).filter(models.Item.nm_id == item.nm_id))
-        record = db_item.scalars().first()
-        if record:
-            # Мы меняем БАЗОВУЮ цену. Финальная пересчитается, если знаем скидку
-            record.wb_price_base = item.new_price
-            # Пересчет финальной (примерный)
-            if record.wb_discount:
-                record.wb_price_final = item.new_price * (1 - record.wb_discount/100)
-            count += 1
-            
-    await db.commit()
-    
-    return {"status": "success", "updated": count}
+    try:
+        changes = await repricer.apply_price_updates(
+            db,
+            ({"nm_id": item.nm_id, "new_price": item.new_price, "reason": "manual_apply"} for item in items),
+            source=source,
+            default_reason="manual_apply",
+        )
+        await db.commit()
+    except RuntimeError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    return {"status": "success", "updated": len(changes), "changes": changes}
