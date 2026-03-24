@@ -2,7 +2,7 @@ from fastapi import FastAPI, Depends, HTTPException
 from datetime import datetime, timedelta
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
-from typing import List
+from typing import List, Tuple
 
 from . import models, schemas, database, wb_client
 from .services import notifier, repricer
@@ -42,6 +42,32 @@ async def lifespan(app: FastAPI):
     scheduler.shutdown()
 
 app = FastAPI(lifespan=lifespan)
+
+
+async def upsert_items_payload(
+    items: List[schemas.ItemCreate],
+    db: AsyncSession,
+) -> Tuple[int, int, List[models.Item]]:
+    created = 0
+    updated = 0
+    persisted: List[models.Item] = []
+
+    for item in items:
+        result = await db.execute(select(models.Item).filter(models.Item.nm_id == item.nm_id))
+        db_item = result.scalars().first()
+
+        if db_item:
+            for key, value in item.model_dump().items():
+                setattr(db_item, key, value)
+            updated += 1
+        else:
+            db_item = models.Item(**item.model_dump())
+            db.add(db_item)
+            created += 1
+
+        persisted.append(db_item)
+
+    return created, updated, persisted
 
 # 1. При старте создаем таблицы
 @app.on_event("startup")
@@ -116,19 +142,21 @@ async def read_items(db: AsyncSession = Depends(database.get_db)):
 # 3. Обновить/Создать вручную
 @app.post("/items/", response_model=schemas.Item)
 async def create_or_update_item(item: schemas.ItemCreate, db: AsyncSession = Depends(database.get_db)):
-    result = await db.execute(select(models.Item).filter(models.Item.nm_id == item.nm_id))
-    db_item = result.scalars().first()
-    
-    if db_item:
-        for key, value in item.dict().items():
-            setattr(db_item, key, value)
-    else:
-        db_item = models.Item(**item.dict())
-        db.add(db_item)
-    
+    _, _, persisted = await upsert_items_payload([item], db)
+    db_item = persisted[0]
     await db.commit()
     await db.refresh(db_item)
     return db_item
+
+
+@app.post("/items/bulk_upsert", response_model=schemas.BulkItemsUpsertResult)
+async def bulk_upsert_items(items: List[schemas.ItemCreate], db: AsyncSession = Depends(database.get_db)):
+    if not items:
+        return schemas.BulkItemsUpsertResult(total=0, created=0, updated=0)
+
+    created, updated, _ = await upsert_items_payload(items, db)
+    await db.commit()
+    return schemas.BulkItemsUpsertResult(total=len(items), created=created, updated=updated)
 
 @app.post("/analytics/sync_stats")
 async def sync_stats(req: schemas.SyncRequest, db: AsyncSession = Depends(database.get_db)):

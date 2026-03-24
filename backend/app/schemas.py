@@ -49,3 +49,10 @@ class SyncRequest(BaseModel):
 class PriceUpdateReq(BaseModel):
     nm_id: int
     new_price: int
+
+
+class BulkItemsUpsertResult(BaseModel):
+    status: str = "success"
+    total: int
+    created: int
+    updated: int
