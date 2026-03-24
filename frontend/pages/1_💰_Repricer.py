@@ -69,6 +69,13 @@ m2.metric("Ждут авто-коррекции", automation_status.get("pending
 m3.metric("В ручном разборе", automation_status.get("manual_review_items", 0))
 m4.metric("Изменено в цикле", last_run.get("changed_items", 0))
 
+strategy_label = automation_status.get("strategy_label", "Protect Margin")
+strategy_description = automation_status.get(
+    "strategy_description",
+    "Фоновый режим повышает цену только у товаров с прибылью ниже цели и не снижает цену у сверхприбыльных SKU.",
+)
+st.info(f"Стратегия авто-режима: `{strategy_label}`. {strategy_description}")
+
 if last_run.get("status") == "failed":
     st.error(f"Последний фоновый цикл завершился ошибкой: {last_run.get('error_message', 'неизвестно')}")
 

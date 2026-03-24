@@ -12,6 +12,12 @@ from app.wb_client import wb
 PROFIT_TOLERANCE_RUB = 100
 MIN_AUTO_CHANGE_RUB = 10
 MIN_AUTO_CHANGE_PCT = 1.0
+AUTO_REPRICER_STRATEGY = "protect_margin"
+AUTO_REPRICER_STRATEGY_LABEL = "Protect Margin"
+AUTO_REPRICER_STRATEGY_DESCRIPTION = (
+    "Фоновый режим повышает цену только у товаров, где фактическая прибыль ниже целевой, "
+    "и не снижает цену у SKU с прибылью выше цели."
+)
 
 REASON_LABELS = {
     "inactive": "Товар выключен",
@@ -21,6 +27,7 @@ REASON_LABELS = {
     "missing_live_price": "Нет актуальной цены WB",
     "invalid_economics": "Комиссия и налог дают некорректную формулу",
     "within_tolerance": "Отклонение в пределах допуска",
+    "above_target_hold": "Прибыль выше цели: цену не снижаем автоматически",
     "price_already_optimal": "Цена уже близка к расчетной",
     "change_below_threshold": "Изменение слишком маленькое",
     "target_profit_gap": "Цена ниже цели по прибыли",
@@ -164,6 +171,8 @@ def build_item_decision(item: models.Item) -> Dict[str, Any]:
             else:
                 should_auto_update = True
                 reason_code = "target_profit_gap"
+        elif profit_gap < -PROFIT_TOLERANCE_RUB:
+            reason_code = "above_target_hold"
         else:
             reason_code = "within_tolerance"
     elif not issues and item.repricer_mode != "auto":
@@ -468,6 +477,9 @@ async def get_automation_status(db: AsyncSession) -> Dict[str, Any]:
     manual_review_items = [row for row in report if row["needs_manual_action"]]
 
     return {
+        "strategy": AUTO_REPRICER_STRATEGY,
+        "strategy_label": AUTO_REPRICER_STRATEGY_LABEL,
+        "strategy_description": AUTO_REPRICER_STRATEGY_DESCRIPTION,
         "schedule_interval_minutes": 60,
         "active_items": len(report),
         "auto_mode_items": len(auto_mode_items),
