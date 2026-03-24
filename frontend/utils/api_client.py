@@ -43,6 +43,10 @@ class APIClient:
         return cls._post("/items/", json_data=item_data) is not None
 
     @classmethod
+    def bulk_save_items(cls, items_data: List[Dict[str, Any]]) -> Dict[str, Any]:
+        return cls._post("/items/bulk_upsert", json_data=items_data, timeout=120) or {}
+
+    @classmethod
     def import_from_wb(cls) -> bool:
         return cls._post("/items/import_from_wb") is not None
 

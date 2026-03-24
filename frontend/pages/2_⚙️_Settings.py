@@ -4,10 +4,181 @@ from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode
 import time
 import os
 import sys
+from io import BytesIO
 
 # Подключаем наш API-клиент
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from utils.api_client import APIClient
+
+IMPORTABLE_COLUMNS = [
+    "nm_id",
+    "vendor_code",
+    "name",
+    "cost_price",
+    "target_profit",
+    "min_price",
+    "wb_commission",
+    "logistics_cost",
+    "tax_rate",
+    "repricer_mode",
+    "is_active",
+]
+
+EXPORT_COLUMNS = IMPORTABLE_COLUMNS + ["auto_ready", "auto_reason"]
+NUMERIC_COLUMNS = {"cost_price", "target_profit", "min_price", "wb_commission", "logistics_cost", "tax_rate"}
+BOOLEAN_COLUMNS = {"is_active"}
+TEXT_COLUMNS = {"vendor_code", "name"}
+MODE_VALUES = {"manual", "auto"}
+
+
+def to_csv_bytes(dataframe: pd.DataFrame) -> bytes:
+    return dataframe.to_csv(index=False).encode("utf-8-sig")
+
+
+def to_excel_bytes(dataframe: pd.DataFrame) -> bytes:
+    buffer = BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        dataframe.to_excel(writer, index=False, sheet_name="items")
+    return buffer.getvalue()
+
+
+def load_uploaded_table(uploaded_file) -> pd.DataFrame:
+    file_bytes = uploaded_file.getvalue()
+    file_name = uploaded_file.name.lower()
+    if file_name.endswith(".csv"):
+        for encoding in ("utf-8-sig", "utf-8", "cp1251"):
+            try:
+                return pd.read_csv(BytesIO(file_bytes), encoding=encoding)
+            except UnicodeDecodeError:
+                continue
+        raise ValueError("Не удалось прочитать CSV. Сохраните файл в UTF-8 или CP1251.")
+    return pd.read_excel(BytesIO(file_bytes))
+
+
+def normalize_import_value(column: str, value):
+    if pd.isna(value):
+        return None
+
+    if column in NUMERIC_COLUMNS:
+        return float(value)
+
+    if column in BOOLEAN_COLUMNS:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(int(value))
+
+        normalized = str(value).strip().lower()
+        true_values = {"true", "1", "yes", "y", "да", "вкл", "on"}
+        false_values = {"false", "0", "no", "n", "нет", "выкл", "off"}
+        if normalized in true_values:
+            return True
+        if normalized in false_values:
+            return False
+        raise ValueError("ожидалось логическое значение")
+
+    if column == "repricer_mode":
+        normalized = str(value).strip().lower()
+        if normalized not in MODE_VALUES:
+            raise ValueError("режим должен быть manual или auto")
+        return normalized
+
+    if column in TEXT_COLUMNS:
+        return str(value).strip()
+
+    return value
+
+
+def values_equal(left, right) -> bool:
+    if isinstance(left, float) or isinstance(right, float):
+        try:
+            return abs(float(left) - float(right)) < 1e-9
+        except (TypeError, ValueError):
+            return left == right
+    return left == right
+
+
+def display_value(value) -> str:
+    if isinstance(value, bool):
+        return "Да" if value else "Нет"
+    if isinstance(value, float):
+        return f"{value:.2f}".rstrip("0").rstrip(".")
+    if value is None:
+        return "—"
+    return str(value)
+
+
+def build_import_preview(uploaded_df: pd.DataFrame, current_df: pd.DataFrame):
+    sanitized = uploaded_df.copy()
+    sanitized.columns = [str(col).strip() for col in sanitized.columns]
+
+    if "nm_id" not in sanitized.columns:
+        raise ValueError("В файле обязательно должна быть колонка nm_id.")
+
+    provided_columns = [column for column in sanitized.columns if column in IMPORTABLE_COLUMNS and column != "nm_id"]
+    ignored_columns = [column for column in sanitized.columns if column not in IMPORTABLE_COLUMNS]
+    if not provided_columns:
+        raise ValueError("В файле нет ни одной изменяемой колонки.")
+
+    current_map = {int(row["nm_id"]): row for row in current_df[IMPORTABLE_COLUMNS].to_dict(orient="records")}
+    preview_rows = []
+    changed_records = []
+    errors = []
+
+    for idx, row in sanitized.iterrows():
+        row_number = idx + 2
+        raw_nm_id = row.get("nm_id")
+        if pd.isna(raw_nm_id):
+            errors.append({"Строка": row_number, "Ошибка": "Пустой nm_id"})
+            continue
+
+        try:
+            nm_id = int(float(raw_nm_id))
+        except (TypeError, ValueError):
+            errors.append({"Строка": row_number, "Ошибка": f"Некорректный nm_id: {raw_nm_id}"})
+            continue
+
+        current_item = current_map.get(nm_id)
+        if not current_item:
+            errors.append({"Строка": row_number, "Ошибка": f"Товар с nm_id={nm_id} не найден в базе"})
+            continue
+
+        merged_item = dict(current_item)
+        change_labels = []
+
+        for column in provided_columns:
+            raw_value = row.get(column)
+            if pd.isna(raw_value):
+                continue
+
+            try:
+                normalized_value = normalize_import_value(column, raw_value)
+            except ValueError as exc:
+                errors.append({"Строка": row_number, "Ошибка": f"{column}: {exc}"})
+                change_labels = []
+                break
+
+            current_value = merged_item.get(column)
+            if not values_equal(current_value, normalized_value):
+                change_labels.append(
+                    f"{column}: {display_value(current_value)} -> {display_value(normalized_value)}"
+                )
+                merged_item[column] = normalized_value
+
+        if not change_labels:
+            continue
+
+        changed_records.append(merged_item)
+        preview_rows.append(
+            {
+                "Строка": row_number,
+                "Артикул": nm_id,
+                "Товар": current_item.get("name"),
+                "Изменения": " | ".join(change_labels),
+            }
+        )
+
+    return changed_records, preview_rows, errors, ignored_columns
 
 st.set_page_config(page_title="База Товаров", page_icon="⚙️", layout="wide")
 
@@ -56,6 +227,64 @@ m2.metric("Активных", active_items)
 m3.metric("В авто-режиме", auto_mode_items)
 m4.metric("Готово к авто", auto_ready_items)
 st.caption("Для участия в фоновой оптимизации товар должен быть активен, переведен в режим `auto`, иметь себестоимость, цель прибыли и актуальную цену WB.")
+
+st.subheader("📤 Импорт и Экспорт")
+export_df = df[EXPORT_COLUMNS].copy()
+csv_bytes = to_csv_bytes(export_df)
+excel_bytes = to_excel_bytes(export_df)
+
+export_col_csv, export_col_xlsx = st.columns(2)
+with export_col_csv:
+    st.download_button(
+        "⬇️ Скачать CSV",
+        data=csv_bytes,
+        file_name="wb_items_settings.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+with export_col_xlsx:
+    st.download_button(
+        "⬇️ Скачать Excel",
+        data=excel_bytes,
+        file_name="wb_items_settings.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
+
+uploaded_file = st.file_uploader(
+    "Загрузите CSV или Excel для массового обновления параметров",
+    type=["csv", "xlsx", "xls"],
+)
+
+if uploaded_file is not None:
+    try:
+        uploaded_df = load_uploaded_table(uploaded_file)
+        changed_records, preview_rows, import_errors, ignored_columns = build_import_preview(uploaded_df, df)
+
+        if ignored_columns:
+            st.caption(f"Игнорируемые колонки: {', '.join(ignored_columns)}")
+
+        if import_errors:
+            st.warning(f"Найдено ошибок: {len(import_errors)}")
+            st.dataframe(pd.DataFrame(import_errors), use_container_width=True, hide_index=True)
+
+        if preview_rows:
+            st.success(f"Готово к обновлению: {len(changed_records)} товаров")
+            st.dataframe(pd.DataFrame(preview_rows), use_container_width=True, hide_index=True)
+
+            if st.button(f"📥 Применить импорт ({len(changed_records)} шт)", type="primary", use_container_width=True):
+                with st.spinner("Применяю импорт..."):
+                    result = APIClient.bulk_save_items(changed_records)
+                    if result:
+                        st.success(
+                            f"Импорт выполнен: всего {result.get('total', 0)}, создано {result.get('created', 0)}, обновлено {result.get('updated', 0)}."
+                        )
+                        time.sleep(1.2)
+                        st.rerun()
+        elif not import_errors:
+            st.info("В файле нет изменений относительно текущих данных.")
+    except Exception as exc:
+        st.error(f"Не удалось обработать файл: {exc}")
 
 # --- 3. НАСТРОЙКА AGGRID ДЛЯ РЕДАКТИРОВАНИЯ ---
 gb = GridOptionsBuilder.from_dataframe(df)
@@ -123,22 +352,15 @@ with col_save:
         updated_df = grid_response['data']
         records = updated_df.to_dict(orient="records")
         records = [{key: item.get(key) for key in persist_columns} for item in records]
-        
-        # Индикатор прогресса
-        progress_bar = st.progress(0)
-        total_items = len(records)
-        success_count = 0
-        
-        # Отправляем обновленные данные на бэкенд по одному (или можно переписать API на bulk update позже)
-        for i, item in enumerate(records):
-            # APIClient.save_item принимает dict (ItemCreate schema)
-            if APIClient.save_item(item):
-                success_count += 1
-            progress_bar.progress((i + 1) / total_items)
-            
-        if success_count == total_items:
-            st.success(f"Все товары ({success_count} шт) успешно обновлены!")
+
+        with st.spinner("Сохраняю изменения..."):
+            result = APIClient.bulk_save_items(records)
+
+        if result:
+            st.success(
+                f"Сохранение завершено: всего {result.get('total', 0)}, создано {result.get('created', 0)}, обновлено {result.get('updated', 0)}."
+            )
             time.sleep(1.5)
             st.rerun()
         else:
-            st.warning(f"Сохранено {success_count} из {total_items}. Проверьте логи.")
+            st.warning("Не удалось сохранить изменения. Проверьте логи.")
