@@ -128,10 +128,11 @@ async def check_prices_manual(message: Message):
                     text += (
                         f"🔹 <b>{item['name']}</b>\n"
                         f"   Прибыль: {item['current_profit']} ₽ (Цель: {item['target_profit']})\n"
-                        f"   ⬇️ Реком. цена на WB: <b>{item['recommended_price_retail']} ₽</b>\n\n"
+                        f"   ⬇️ Реком. цена на WB: <b>{item['recommended_price_retail']} ₽</b>, "
+                        f"скидка: <b>{item.get('recommended_discount', 0)}%</b>\n\n"
                     )
-                    btn_text = f"✅ {item['name'][:12]}.. -> {item['recommended_price_retail']}₽"
-                    btn_data = f"set_price:{item['nm_id']}:{item['recommended_price_retail']}"
+                    btn_text = f"✅ {item['name'][:12]}.. -> {item['recommended_price_retail']}₽ / {item.get('recommended_discount', 0)}%"
+                    btn_data = f"set_price:{item['nm_id']}:{item['recommended_price_retail']}:{item.get('recommended_discount', 0)}"
                     keyboard_rows.append([InlineKeyboardButton(text=btn_text, callback_data=btn_data)])
                 
                 if len(bad_items) > 5:
@@ -188,17 +189,23 @@ async def check_status(message: Message):
 async def process_price_update(callback: CallbackQuery):
     if not is_admin(callback.from_user.id): return
     
-    _, nm_id, price = callback.data.split(":")
+    parts = callback.data.split(":")
+    _, nm_id, price = parts[:3]
+    discount = int(parts[3]) if len(parts) > 3 else None
     await callback.answer("⏳ Отправляю запрос...") 
     
-    payload = [{"nm_id": int(nm_id), "new_price": int(price)}]
+    payload_item = {"nm_id": int(nm_id), "new_price": int(price)}
+    if discount is not None:
+        payload_item["new_discount"] = discount
+    payload = [payload_item]
     
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(f"{BACKEND_URL}/repricer/batch_update?source=manual_bot", json=payload) as resp:
                 if resp.status == 200:
                     await callback.message.edit_text(
-                        text=f"{callback.message.text}\n\n✅ <b>УСПЕШНО!</b> Цена изменена на {price} ₽",
+                        text=f"{callback.message.text}\n\n✅ <b>УСПЕШНО!</b> Цена изменена на {price} ₽"
+                        + (f", скидка {discount}%" if discount is not None else ""),
                         parse_mode="HTML",
                         reply_markup=None 
                     )

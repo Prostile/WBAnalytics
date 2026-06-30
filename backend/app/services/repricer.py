@@ -32,6 +32,9 @@ REASON_LABELS = {
     "change_below_threshold": "Изменение слишком маленькое",
     "target_profit_gap": "Цена ниже цели по прибыли",
     "min_price_floor_applied": "Ограничено минимальной ценой",
+    "max_price_ceiling": "Расчет выше верхнего порога цены",
+    "discount_drift": "Скидка WB отличается от целевой",
+    "invalid_target_discount": "Некорректная целевая скидка",
 }
 
 
@@ -44,6 +47,27 @@ def _final_price_from_retail(retail_price: float, discount: int) -> float:
     if factor <= 0:
         return float(retail_price or 0)
     return float(retail_price or 0) * factor
+
+
+def _normalize_discount(discount: int | float | None) -> int:
+    try:
+        value = int(float(discount if discount is not None else 0))
+    except (TypeError, ValueError):
+        value = 0
+    return max(0, min(value, 99))
+
+
+def _discount_is_valid(discount: int | float | None) -> bool:
+    try:
+        value = int(float(discount if discount is not None else 0))
+    except (TypeError, ValueError):
+        return False
+    return 0 <= value <= 99
+
+
+def _target_discount(item: models.Item) -> int:
+    raw_discount = item.target_discount if item.target_discount is not None else item.wb_discount
+    return _normalize_discount(raw_discount)
 
 
 def _current_profit(item: models.Item, final_price: float | None = None) -> float:
@@ -59,6 +83,10 @@ def _current_profit(item: models.Item, final_price: float | None = None) -> floa
 
 def _rounded_floor_price(price: float) -> int:
     return int(math.ceil(float(price or 0) / 10) * 10)
+
+
+def _rounded_cap_price(price: float) -> int:
+    return max(0, int(math.floor(float(price or 0) / 10) * 10))
 
 
 def _reason_label(code: str | None) -> str:
@@ -107,6 +135,8 @@ def _serialize_event(event: models.RepricerEvent) -> Dict[str, Any]:
         "new_profit": event.new_profit,
         "target_profit": event.target_profit,
         "wb_discount": event.wb_discount,
+        "old_discount": event.old_discount,
+        "new_discount": event.new_discount,
         "price_delta": event.price_delta,
         "price_delta_percent": event.price_delta_percent,
         "created_at": _serialize_dt(event.created_at),
@@ -116,6 +146,10 @@ def _serialize_event(event: models.RepricerEvent) -> Dict[str, Any]:
 def build_item_decision(item: models.Item) -> Dict[str, Any]:
     current_price_retail = float(item.wb_price_base or 0)
     current_price_final = float(item.wb_price_final or 0)
+    current_discount = _normalize_discount(item.wb_discount)
+    target_discount = _target_discount(item)
+    discount_delta = target_discount - current_discount
+    discount_drift = discount_delta != 0
     current_profit = _current_profit(item, current_price_final)
 
     issues: List[str] = []
@@ -127,6 +161,8 @@ def build_item_decision(item: models.Item) -> Dict[str, Any]:
         issues.append("missing_target_profit")
     if current_price_retail <= 0 or current_price_final <= 0:
         issues.append("missing_live_price")
+    if item.target_discount is not None and not _discount_is_valid(item.target_discount):
+        issues.append("invalid_target_discount")
 
     optimal = unit_economics.calculate_optimal_price(
         target_profit=float(item.target_profit or 0),
@@ -134,7 +170,7 @@ def build_item_decision(item: models.Item) -> Dict[str, Any]:
         logistics=float(item.logistics_cost or 0),
         tax_rate=float(item.tax_rate or 0),
         commission=float(item.wb_commission or 0),
-        current_discount=int(item.wb_discount or 0),
+        current_discount=target_discount,
     )
 
     if optimal.get("error"):
@@ -146,17 +182,27 @@ def build_item_decision(item: models.Item) -> Dict[str, Any]:
 
     if float(item.min_price or 0) > 0 and recommended_price_retail > 0 and recommended_price_retail < float(item.min_price):
         recommended_price_retail = _rounded_floor_price(float(item.min_price))
-        recommended_price_final = _final_price_from_retail(recommended_price_retail, int(item.wb_discount or 0))
+        recommended_price_final = _final_price_from_retail(recommended_price_retail, target_discount)
         floor_applied = True
+
+    max_price = float(item.max_price or 0)
+    ceiling_applied = False
+    if max_price > 0 and recommended_price_retail > max_price:
+        recommended_price_retail = _rounded_cap_price(max_price)
+        recommended_price_final = _final_price_from_retail(recommended_price_retail, target_discount)
+        issues.append("max_price_ceiling")
+        ceiling_applied = True
 
     projected_profit = _current_profit(item, recommended_price_final) if recommended_price_retail > 0 else current_profit
     profit_gap = float(item.target_profit or 0) - current_profit
     price_delta = recommended_price_retail - current_price_retail
     price_delta_pct = (price_delta / current_price_retail * 100) if current_price_retail > 0 else 0.0
+    final_price_delta = recommended_price_final - current_price_final
+    final_price_delta_pct = (final_price_delta / current_price_final * 100) if current_price_final > 0 else 0.0
 
     status = "⚪ SETUP"
     if not issues:
-        status = "OK" if abs(profit_gap) <= PROFIT_TOLERANCE_RUB else "⚠️ MISMATCH"
+        status = "OK" if abs(profit_gap) <= PROFIT_TOLERANCE_RUB and not discount_drift else "⚠️ MISMATCH"
 
     auto_ready = not issues and item.repricer_mode == "auto"
     should_auto_update = False
@@ -164,15 +210,21 @@ def build_item_decision(item: models.Item) -> Dict[str, Any]:
 
     if auto_ready:
         if profit_gap > PROFIT_TOLERANCE_RUB:
-            if price_delta <= 0:
+            if final_price_delta <= 0 and not discount_drift:
                 reason_code = "price_already_optimal"
-            elif abs(price_delta) < MIN_AUTO_CHANGE_RUB or abs(price_delta_pct) < MIN_AUTO_CHANGE_PCT:
+            elif (
+                not discount_drift
+                and (abs(final_price_delta) < MIN_AUTO_CHANGE_RUB or abs(final_price_delta_pct) < MIN_AUTO_CHANGE_PCT)
+            ):
                 reason_code = "change_below_threshold"
             else:
                 should_auto_update = True
                 reason_code = "target_profit_gap"
         elif profit_gap < -PROFIT_TOLERANCE_RUB:
             reason_code = "above_target_hold"
+        elif discount_drift:
+            should_auto_update = True
+            reason_code = "discount_drift"
         else:
             reason_code = "within_tolerance"
     elif not issues and item.repricer_mode != "auto":
@@ -184,7 +236,7 @@ def build_item_decision(item: models.Item) -> Dict[str, Any]:
     needs_manual_action = (
         not issues
         and item.repricer_mode == "manual"
-        and profit_gap > PROFIT_TOLERANCE_RUB
+        and (profit_gap > PROFIT_TOLERANCE_RUB or discount_drift)
         and recommended_price_retail > 0
     )
 
@@ -199,7 +251,10 @@ def build_item_decision(item: models.Item) -> Dict[str, Any]:
         "needs_manual_action": needs_manual_action,
         "reason_code": reason_code,
         "reason_label": _reason_label(reason_code),
-        "wb_discount": int(item.wb_discount or 0),
+        "wb_discount": current_discount,
+        "target_discount": target_discount,
+        "recommended_discount": target_discount,
+        "discount_delta": discount_delta,
         "current_price_retail": current_price_retail,
         "current_price": current_price_final,
         "current_profit": round(current_profit, 0),
@@ -210,7 +265,11 @@ def build_item_decision(item: models.Item) -> Dict[str, Any]:
         "projected_profit": round(projected_profit, 0),
         "price_delta": round(price_delta, 0),
         "price_delta_pct": round(price_delta_pct, 2),
+        "final_price_delta": round(final_price_delta, 0),
+        "final_price_delta_pct": round(final_price_delta_pct, 2),
         "min_price": float(item.min_price or 0),
+        "max_price": max_price,
+        "ceiling_applied": ceiling_applied,
         "status": status,
     }
 
@@ -281,10 +340,14 @@ async def apply_price_updates(
         new_price = int(update["new_price"])
         if new_price <= 0:
             continue
+        new_discount = update.get("new_discount")
+        if new_discount is not None and not _discount_is_valid(new_discount):
+            continue
         normalized_updates.append(
             {
                 "nm_id": nm_id,
                 "new_price": new_price,
+                "new_discount": new_discount,
                 "reason": update.get("reason", default_reason),
             }
         )
@@ -305,11 +368,17 @@ async def apply_price_updates(
 
         old_price_retail = float(item.wb_price_base or 0)
         old_price_final = float(item.wb_price_final or 0)
+        old_discount = _normalize_discount(item.wb_discount)
         new_price_retail = int(update["new_price"])
-        if int(old_price_retail) == new_price_retail:
+        new_discount = (
+            _normalize_discount(update["new_discount"])
+            if update.get("new_discount") is not None
+            else _target_discount(item)
+        )
+        if int(old_price_retail) == new_price_retail and old_discount == new_discount:
             continue
 
-        new_price_final = _final_price_from_retail(new_price_retail, int(item.wb_discount or 0))
+        new_price_final = _final_price_from_retail(new_price_retail, new_discount)
         old_profit = _current_profit(item, old_price_final)
         new_profit = _current_profit(item, new_price_final)
         price_delta = new_price_retail - old_price_retail
@@ -327,7 +396,9 @@ async def apply_price_updates(
                 "old_profit": old_profit,
                 "new_profit": new_profit,
                 "target_profit": float(item.target_profit or 0),
-                "wb_discount": int(item.wb_discount or 0),
+                "wb_discount": new_discount,
+                "old_discount": old_discount,
+                "new_discount": new_discount,
                 "price_delta": price_delta,
                 "price_delta_percent": price_delta_percent,
                 "reason": update["reason"],
@@ -337,7 +408,14 @@ async def apply_price_updates(
     if not planned_changes:
         return []
 
-    wb_payload = [{"nmID": change["nm_id"], "price": int(change["new_price_retail"])} for change in planned_changes]
+    wb_payload = [
+        {
+            "nmID": change["nm_id"],
+            "price": int(change["new_price_retail"]),
+            "discount": int(change["new_discount"]),
+        }
+        for change in planned_changes
+    ]
     if not wb.update_prices(wb_payload):
         raise RuntimeError("WB не принял пакет обновления цен.")
 
@@ -345,7 +423,9 @@ async def apply_price_updates(
     for change in planned_changes:
         item = change.pop("item")
         item.wb_price_base = change["new_price_retail"]
+        item.wb_discount = change["new_discount"]
         item.wb_price_final = change["new_price_final"]
+        item.target_discount = change["new_discount"]
         item.updated_at = _now_utc()
 
         db.add(
@@ -371,6 +451,8 @@ async def apply_price_updates(
                 new_profit=change["new_profit"],
                 target_profit=change["target_profit"],
                 wb_discount=change["wb_discount"],
+                old_discount=change["old_discount"],
+                new_discount=change["new_discount"],
                 price_delta=change["price_delta"],
                 price_delta_percent=change["price_delta_percent"],
             )
@@ -395,6 +477,7 @@ async def run_background_repricing(db: AsyncSession, source: str = "scheduler_ho
             {
                 "nm_id": row["nm_id"],
                 "new_price": int(row["recommended_price_retail"]),
+                "new_discount": int(row["recommended_discount"]),
                 "reason": row["reason_code"],
             }
             for row in report

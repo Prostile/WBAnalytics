@@ -24,6 +24,7 @@ async def check_prices_job():
             "profit": int(item["current_profit"]),
             "target": int(item["target_profit"]),
             "new_price": int(item["recommended_price_retail"]),
+            "new_discount": int(item["recommended_discount"]),
             "nm_id": item["nm_id"],
         }
         for item in result["manual_alerts"]

@@ -24,6 +24,10 @@ class Item(Base):
     wb_price_base = Column(Float, default=0.0)   # Розничная (зачеркнутая)
     wb_discount = Column(Integer, default=0)     # Скидка продавца %
     wb_price_final = Column(Float, default=0.0)  # Текущая цена на сайте
+
+    # --- УПРАВЛЯЕМЫЕ ОГРАНИЧЕНИЯ РЕПРАЙСЕРА ---
+    target_discount = Column(Integer, nullable=True) # Какую скидку продавца удерживать при отправке цен
+    max_price = Column(Float, default=0.0)       # Верхний порог базовой цены WB, 0 = не ограничивать
     
     # --- УПРАВЛЕНИЕ ---
     # Режим работы: 'manual' (только советы) или 'auto' (сам меняет цены)
@@ -129,6 +133,8 @@ class RepricerEvent(Base):
     new_profit = Column(Float, default=0.0)
     target_profit = Column(Float, default=0.0)
     wb_discount = Column(Integer, default=0)
+    old_discount = Column(Integer, default=0)
+    new_discount = Column(Integer, default=0)
     price_delta = Column(Float, default=0.0)
     price_delta_percent = Column(Float, default=0.0)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

@@ -177,12 +177,12 @@ class WBClient:
     def update_prices(self, updates: list):
         """
         Отправляет новые цены на WB.
-        updates - это список словарей: [{"nmId": 123, "price": 5000}]
+        updates - это список словарей: [{"nmID": 123, "price": 5000, "discount": 35}]
         """
         url = "https://discounts-prices-api.wildberries.ru/api/v2/upload/task"
         
-        # WB требует такой формат: {"data": [{"nmID": ..., "price": ...}]}
-        # Важно: "price" - это розничная цена (до скидки)!
+        # WB требует такой формат: {"data": [{"nmID": ..., "price": ..., "discount": ...}]}
+        # Важно: "price" - это розничная цена до скидки, а "discount" - скидка продавца.
         
         payload = {"data": updates}
         

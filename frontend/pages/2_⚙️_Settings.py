@@ -20,12 +20,15 @@ IMPORTABLE_COLUMNS = [
     "wb_commission",
     "logistics_cost",
     "tax_rate",
+    "target_discount",
+    "max_price",
     "repricer_mode",
     "is_active",
 ]
 
 EXPORT_COLUMNS = IMPORTABLE_COLUMNS + ["auto_ready", "auto_reason"]
-NUMERIC_COLUMNS = {"cost_price", "target_profit", "min_price", "wb_commission", "logistics_cost", "tax_rate"}
+NUMERIC_COLUMNS = {"cost_price", "target_profit", "min_price", "max_price", "wb_commission", "logistics_cost", "tax_rate"}
+INTEGER_COLUMNS = {"target_discount"}
 BOOLEAN_COLUMNS = {"is_active"}
 TEXT_COLUMNS = {"vendor_code", "name"}
 MODE_VALUES = {"manual", "auto"}
@@ -61,6 +64,9 @@ def normalize_import_value(column: str, value):
 
     if column in NUMERIC_COLUMNS:
         return float(value)
+
+    if column in INTEGER_COLUMNS:
+        return int(float(value))
 
     if column in BOOLEAN_COLUMNS:
         if isinstance(value, bool):
@@ -317,6 +323,8 @@ gb.configure_column("wb_commission", header_name="Комиссия WB (0.25 = 25
 gb.configure_column("logistics_cost", header_name="Логистика (₽)", editable=True, type=["numericColumn"])
 gb.configure_column("tax_rate", header_name="Налог (0.07 = 7%)", editable=True, type=["numericColumn"])
 gb.configure_column("min_price", header_name="Мин. порог цены (₽)", editable=True, type=["numericColumn"])
+gb.configure_column("max_price", header_name="Макс. базовая цена WB (₽)", editable=True, type=["numericColumn"])
+gb.configure_column("target_discount", header_name="Целевая скидка продавца (%)", editable=True, type=["numericColumn"])
 gb.configure_column("is_active", header_name="Активен", editable=True)
 
 # Выпадающий список для режима репрайсера

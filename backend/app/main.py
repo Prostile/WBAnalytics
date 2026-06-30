@@ -57,11 +57,11 @@ async def upsert_items_payload(
         db_item = result.scalars().first()
 
         if db_item:
-            for key, value in item.model_dump().items():
+            for key, value in item.model_dump(exclude_unset=True).items():
                 setattr(db_item, key, value)
             updated += 1
         else:
-            db_item = models.Item(**item.model_dump())
+            db_item = models.Item(**item.model_dump(exclude_unset=True))
             db.add(db_item)
             created += 1
 
@@ -122,6 +122,7 @@ async def import_items_from_wb(db: AsyncSession = Depends(database.get_db)):
                 wb_price_base=price_info["wb_price_base"],
                 wb_discount=price_info["wb_discount"],
                 wb_price_final=price_info["wb_price_final"],
+                target_discount=price_info["wb_discount"],
                 
                 cost_price=0,
                 target_profit=0
@@ -399,6 +400,7 @@ async def run_auto_now(db: AsyncSession = Depends(database.get_db)):
             "profit": int(item["current_profit"]),
             "target": int(item["target_profit"]),
             "new_price": int(item["recommended_price_retail"]),
+            "new_discount": int(item["recommended_discount"]),
             "nm_id": item["nm_id"],
         }
         for item in result["manual_alerts"]
@@ -425,7 +427,15 @@ async def batch_update_prices(
     try:
         changes = await repricer.apply_price_updates(
             db,
-            ({"nm_id": item.nm_id, "new_price": item.new_price, "reason": "manual_apply"} for item in items),
+            (
+                {
+                    "nm_id": item.nm_id,
+                    "new_price": item.new_price,
+                    "new_discount": item.new_discount,
+                    "reason": "manual_apply",
+                }
+                for item in items
+            ),
             source=source,
             default_reason="manual_apply",
         )

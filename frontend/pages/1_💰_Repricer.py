@@ -105,12 +105,14 @@ def render_grid(dataframe, key_suffix):
     gb.configure_column("name", header_name="Товар", width=250, pinned='left', headerTooltip="Название из карточки WB")
     gb.configure_column("mode", header_name="Режим", width=95)
     gb.configure_column("target_profit", header_name="Цель", type=["numericColumn"], valueFormatter="x.toLocaleString() + ' ₽'")
-    gb.configure_column("wb_discount", header_name="Скидка продавца %", type=["numericColumn"], headerTooltip="Ваша скидка в личном кабинете WB")
+    gb.configure_column("wb_discount", header_name="Скидка WB %", type=["numericColumn"], headerTooltip="Текущая скидка продавца, которую вернул WB")
+    gb.configure_column("target_discount", header_name="Целевая скидка %", type=["numericColumn"], headerTooltip="Скидка продавца, которую репрайсер будет отправлять вместе с ценой")
     gb.configure_column("current_price", header_name="Сейчас (Клиент)", type=["numericColumn"], valueFormatter="x.toLocaleString() + ' ₽'", headerTooltip="Текущая цена для покупателя на сайте")
     gb.configure_column("current_profit", header_name="Прибыль (Факт)", type=["numericColumn"], valueFormatter="x.toLocaleString() + ' ₽'", headerTooltip="Чистая прибыль с одной штуки при текущей цене")
     
     # Рекомендации
     gb.configure_column("recommended_price_final", header_name="Новая (Клиент)", type=["numericColumn"], valueFormatter="x.toLocaleString() + ' ₽'", headerTooltip="Цена для клиента, которая даст целевую прибыль")
+    gb.configure_column("recommended_discount", header_name="Отправим скидку %", type=["numericColumn"], headerTooltip="Скидка продавца, которую отправим по API")
     gb.configure_column("price_delta", header_name="Изменение", width=120, headerTooltip="На сколько процентов изменится базовая цена")
     gb.configure_column("recommended_price_retail", header_name="🚀 Отправим на WB", type=["numericColumn"], valueFormatter="x.toLocaleString() + ' ₽'", cellStyle={'backgroundColor': '#e8f4f8', 'fontWeight': 'bold'}, headerTooltip="Базовая цена до скидки. Именно её мы пошлем по API.")
     gb.configure_column("projected_profit", header_name="Прибыль после", type=["numericColumn"], valueFormatter="x.toLocaleString() + ' ₽'")
@@ -158,7 +160,15 @@ with col_apply:
             selected_list = selected
             
         if st.button(f"✅ Применить ({len(selected_list)} шт)", type="primary", use_container_width=True):
-            to_update = [{"nm_id": int(r['nm_id']), "new_price": int(r['recommended_price_retail'])} for r in selected_list if r.get('recommended_price_retail', 0) > 0]
+            to_update = [
+                {
+                    "nm_id": int(r['nm_id']),
+                    "new_price": int(r['recommended_price_retail']),
+                    "new_discount": int(r.get('recommended_discount', r.get('target_discount', r.get('wb_discount', 0))) or 0),
+                }
+                for r in selected_list
+                if r.get('recommended_price_retail', 0) > 0
+            ]
             if to_update:
                 with st.spinner("Отправка на WB..."):
                     if APIClient.batch_update_prices(to_update):

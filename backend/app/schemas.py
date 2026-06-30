@@ -23,6 +23,10 @@ class ItemBase(BaseModel):
     wb_price_base: float = 0.0
     wb_discount: int = 0
     wb_price_final: float = 0.0
+
+    # УПРАВЛЯЕМЫЕ ОГРАНИЧЕНИЯ РЕПРАЙСЕРА
+    target_discount: Optional[int] = None
+    max_price: float = 0.0
     
     repricer_mode: str = "manual"
     is_active: bool = True
@@ -49,6 +53,7 @@ class SyncRequest(BaseModel):
 class PriceUpdateReq(BaseModel):
     nm_id: int
     new_price: int
+    new_discount: Optional[int] = None
 
 
 class BulkItemsUpsertResult(BaseModel):

@@ -6,7 +6,7 @@ def calculate_optimal_price(
     logistics: float,
     tax_rate: float,    # 0.07
     commission: float,  # 0.25
-    current_discount: int # Например 40 (Скидка продавца)
+    current_discount: int # Например 40 (целевая скидка продавца)
 ) -> dict:
     """
     Рассчитывает цену, которую нужно поставить на WB, чтобы получить Target Profit.
@@ -31,7 +31,7 @@ def calculate_optimal_price(
     required_final_price = math.ceil(required_final_price / 10) * 10
     
     # Теперь считаем, какую "Зачеркнутую цену" (Retail Price) надо поставить, 
-    # чтобы с учетом Скидки Продавца (current_discount) получилась эта цена.
+    # чтобы с учетом управляемой скидки продавца (current_discount) получилась эта цена.
     # Final = Retail * (1 - Discount/100)
     # Retail = Final / (1 - Discount/100)
     
