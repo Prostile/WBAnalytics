@@ -2,7 +2,27 @@ from __future__ import annotations
 
 from typing import Any
 
+import pandas as pd
 import streamlit as st
+
+
+def selected_rows_to_records(selected_rows: Any) -> list[dict[str, Any]]:
+    """Normalize AgGrid selected_rows across streamlit-aggrid versions.
+
+    Some versions return a list of dicts, others return a DataFrame.
+    Do not use `if selected_rows` directly: pandas raises an ambiguous truth-value error.
+    """
+    if selected_rows is None:
+        return []
+    if isinstance(selected_rows, pd.DataFrame):
+        return selected_rows.to_dict(orient="records") if not selected_rows.empty else []
+    if isinstance(selected_rows, list):
+        return selected_rows
+    try:
+        return list(selected_rows)
+    except TypeError:
+        return []
+
 
 
 def apply_fintech_theme() -> None:
@@ -35,10 +55,10 @@ def apply_fintech_theme() -> None:
 
     .stApp { background: var(--app-bg); color: var(--text); }
     .block-container {
-        max-width: 1540px;
+        max-width: 1680px;
         padding-top: 24px;
-        padding-left: 36px;
-        padding-right: 36px;
+        padding-left: 28px;
+        padding-right: 28px;
         padding-bottom: 32px;
     }
 
@@ -230,6 +250,37 @@ def apply_fintech_theme() -> None:
     }
     .ag-header-cell-label { font-weight: 800; color: #334155; }
     .ag-cell { display: flex; align-items: center; }
+
+
+    .toolbar-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        margin: 8px 0 16px;
+    }
+    .toolbar-title { color: var(--muted); font-size: 13px; }
+    .compact-help { color: var(--muted); font-size: 12px; line-height: 1.45; }
+
+    .ag-theme-balham .ag-header-cell,
+    .ag-theme-streamlit .ag-header-cell {
+        white-space: nowrap !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
+    }
+    .ag-theme-balham .ag-header-cell-label,
+    .ag-theme-streamlit .ag-header-cell-label {
+        white-space: nowrap !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
+    }
+    .ag-theme-balham .ag-cell,
+    .ag-theme-streamlit .ag-cell {
+        white-space: nowrap !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
+    }
+    .ag-center-cols-viewport { min-height: unset !important; }
 
     @media (max-width: 1100px) {
         .block-container { padding-left: 18px; padding-right: 18px; }

@@ -288,31 +288,41 @@ section("Редактор параметров", "Не выводим все п�
 
 EDIT_SETS = {
     "Базовые": ["nm_id", "name", "vendor_code", "is_active"],
-    "Экономика": ["nm_id", "name", "cost_price", "logistics_cost", "return_cost_per_unit", "ads_cost_per_unit", "overhead_per_unit", "min_profit_rub", "desired_profit_rub", "wb_commission", "tax_rate"],
-    "Price Lock": ["nm_id", "name", "price_lock_enabled", "locked_final_price", "locked_discount", "price_tolerance_rub", "pricing_strategy", "repricer_mode", "auto_ready", "auto_reason"],
-    "WB состояние": ["nm_id", "name", "wb_price_base", "wb_discount", "wb_price_final", "target_discount", "min_price", "max_price", "auto_ready", "auto_reason"],
+    "Экономика": ["nm_id", "name", "cost_price", "logistics_cost", "return_cost_per_unit", "ads_cost_per_unit", "overhead_per_unit", "min_profit_rub", "desired_profit_rub"],
+    "Комиссии": ["nm_id", "name", "wb_commission", "tax_rate"],
+    "Price Lock": ["nm_id", "name", "price_lock_enabled", "locked_final_price", "locked_discount", "price_tolerance_rub", "pricing_strategy", "auto_ready", "auto_reason"],
+    "WB состояние": ["nm_id", "name", "wb_price_base", "wb_discount", "wb_price_final", "auto_ready", "auto_reason"],
 }
 
 EDITABLE_BY_TAB = {
     "Базовые": {"name", "vendor_code", "is_active"},
-    "Экономика": {"cost_price", "logistics_cost", "return_cost_per_unit", "ads_cost_per_unit", "overhead_per_unit", "min_profit_rub", "desired_profit_rub", "wb_commission", "tax_rate"},
-    "Price Lock": {"price_lock_enabled", "locked_final_price", "locked_discount", "price_tolerance_rub", "pricing_strategy", "repricer_mode"},
-    "WB состояние": {"target_discount", "min_price", "max_price"},
+    "Экономика": {"cost_price", "logistics_cost", "return_cost_per_unit", "ads_cost_per_unit", "overhead_per_unit", "min_profit_rub", "desired_profit_rub"},
+    "Комиссии": {"wb_commission", "tax_rate"},
+    "Price Lock": {"price_lock_enabled", "locked_final_price", "locked_discount", "price_tolerance_rub", "pricing_strategy"},
+    "WB состояние": set(),
 }
 
 updated_frames: dict[str, pd.DataFrame] = {}
 
 def configure_grid(subset: pd.DataFrame, tab_key: str):
     gb = GridOptionsBuilder.from_dataframe(subset)
-    gb.configure_default_column(resizable=True, filterable=True, sortable=True, editable=False, wrapHeaderText=True, autoHeaderHeight=True)
-    gb.configure_grid_options(rowHeight=42, headerHeight=44, enableCellTextSelection=True, ensureDomOrder=True, suppressHorizontalScroll=False)
-    gb.configure_column("nm_id", header_name="nmID", pinned="left", width=98, editable=False)
+    gb.configure_default_column(
+        resizable=True,
+        filterable=True,
+        sortable=True,
+        editable=False,
+        wrapHeaderText=False,
+        autoHeaderHeight=False,
+        suppressSizeToFit=True,
+    )
+    gb.configure_grid_options(rowHeight=44, headerHeight=48, enableCellTextSelection=True, ensureDomOrder=True, suppressHorizontalScroll=False, tooltipShowDelay=150)
+    gb.configure_column("nm_id", header_name="nmID", pinned="left", width=120, minWidth=110, editable=False)
     if "name" in subset.columns:
-        gb.configure_column("name", header_name="Товар", pinned="left", width=260, editable=True if tab_key == "basic" else False, tooltipField="name")
+        gb.configure_column("name", header_name="Товар", pinned="left", width=330, minWidth=280, editable=True if tab_key == "базовые" else False, tooltipField="name")
     if "vendor_code" in subset.columns:
-        gb.configure_column("vendor_code", header_name="Артикул продавца", width=165, editable=True)
+        gb.configure_column("vendor_code", header_name="Артикул продавца", width=180, editable=True)
     if "is_active" in subset.columns:
-        gb.configure_column("is_active", header_name="Активен", width=95, editable=True)
+        gb.configure_column("is_active", header_name="Активен", width=110, editable=True)
 
     labels = {
         "cost_price": "Себестоимость",
@@ -328,39 +338,37 @@ def configure_grid(subset: pd.DataFrame, tab_key: str):
         "locked_discount": "Фикс. скидка %",
         "price_tolerance_rub": "Допуск ₽",
         "pricing_strategy": "Стратегия",
-        "repricer_mode": "Legacy режим",
         "price_lock_enabled": "Price Lock",
         "wb_price_base": "WB база",
         "wb_discount": "WB скидка",
         "wb_price_final": "WB цена",
-        "target_discount": "Legacy скидка",
-        "min_price": "Legacy мин.",
-        "max_price": "Legacy макс.",
         "auto_ready": "Готов",
         "auto_reason": "Комментарий",
     }
-    money_like = {"cost_price", "logistics_cost", "return_cost_per_unit", "ads_cost_per_unit", "overhead_per_unit", "min_profit_rub", "desired_profit_rub", "locked_final_price", "price_tolerance_rub", "wb_price_base", "wb_price_final", "min_price", "max_price"}
-    percent_like = {"wb_commission", "tax_rate", "locked_discount", "target_discount", "wb_discount"}
+    money_like = {"cost_price", "logistics_cost", "return_cost_per_unit", "ads_cost_per_unit", "overhead_per_unit", "min_profit_rub", "desired_profit_rub", "locked_final_price", "price_tolerance_rub", "wb_price_base", "wb_price_final"}
+    percent_like = {"wb_commission", "tax_rate", "locked_discount", "wb_discount"}
+    readonly = {"wb_price_base", "wb_discount", "wb_price_final", "auto_ready", "auto_reason"}
 
     for col, label in labels.items():
         if col not in subset.columns:
             continue
-        editable = col not in {"wb_price_base", "wb_discount", "wb_price_final", "auto_ready", "auto_reason"}
-        width = 136
+        editable = col in EDITABLE_BY_TAB.get(tab_key, set()) and col not in readonly
+        width = 154
         params = {"header_name": label, "width": width, "editable": editable}
         if col in money_like:
             params.update({"type": ["numericColumn"], "valueFormatter": "x == null ? '' : x.toLocaleString('ru-RU') + ' ₽'"})
         if col in percent_like:
             params.update({"type": ["numericColumn"], "valueFormatter": "x == null ? '' : x.toLocaleString('ru-RU') + ' %'"})
-        if col in {"pricing_strategy", "repricer_mode", "auto_reason"}:
-            params["width"] = 210 if col != "auto_reason" else 340
+        if col == "pricing_strategy":
+            params["width"] = 220
+            params["tooltipField"] = col
+        if col == "auto_reason":
+            params["width"] = 460
             params["tooltipField"] = col
         gb.configure_column(col, **params)
 
     if "pricing_strategy" in subset.columns:
         gb.configure_column("pricing_strategy", cellEditor="agSelectCellEditor", cellEditorParams={"values": sorted(STRATEGY_VALUES)})
-    if "repricer_mode" in subset.columns:
-        gb.configure_column("repricer_mode", cellEditor="agSelectCellEditor", cellEditorParams={"values": sorted(MODE_VALUES)})
 
     response = AgGrid(
         subset,
@@ -369,8 +377,8 @@ def configure_grid(subset: pd.DataFrame, tab_key: str):
         update_mode=GridUpdateMode.MODEL_CHANGED,
         fit_columns_on_grid_load=False,
         theme="balham",
-        height=540,
-        key=f"settings_grid_{tab_key}",
+        height=500,
+        key=f"settings_grid_{tab_key}_v2",
     )
     return pd.DataFrame(response["data"])
 
@@ -379,7 +387,7 @@ for tab, (label, columns) in zip(tabs, EDIT_SETS.items()):
     with tab:
         available_columns = [col for col in columns if col in df.columns]
         tab_df = df[available_columns].copy()
-        updated_frames[label] = configure_grid(tab_df, label.lower().replace(" ", "_"))
+        updated_frames[label] = configure_grid(tab_df, label)
 
 save_col, info_col = st.columns([1, 4])
 with save_col:
