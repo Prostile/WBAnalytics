@@ -1,5 +1,6 @@
-import aiohttp
 import os
+
+import aiohttp
 
 from app import database
 from app.services import notifier, repricer
@@ -8,21 +9,21 @@ BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8111")
 
 
 async def check_prices_job():
-    print("⏰ [Scheduler] Проверка маржинальности и цен...")
+    print("⏰ [Scheduler] Price Lock: проверка фиксированных цен WB...")
 
     async with database.SessionLocal() as db:
         try:
-            result = await repricer.run_background_repricing(db)
+            result = await repricer.run_background_repricing(db, source="scheduler_price_lock")
         except Exception as exc:
-            print(f"💥 [Scheduler] Фоновая оптимизация упала: {exc}")
-            await notifier.send_job_error("Фоновая оптимизация", str(exc))
+            print(f"💥 [Scheduler] Price Lock упал: {exc}")
+            await notifier.send_job_error("Price Lock", str(exc))
             return
 
     manual_alerts_batch = [
         {
             "name": item["name"] or str(item["nm_id"]),
             "profit": int(item["current_profit"]),
-            "target": int(item["target_profit"]),
+            "target": int(item.get("min_profit_rub") or 0),
             "new_price": int(item["recommended_price_retail"]),
             "new_discount": int(item["recommended_discount"]),
             "nm_id": item["nm_id"],
@@ -31,33 +32,32 @@ async def check_prices_job():
     ]
 
     if manual_alerts_batch:
-        print(f"📢 [Scheduler] Отправляем ручные алерты ({len(manual_alerts_batch)} товаров)")
+        print(f"📢 [Scheduler] Есть рекомендации к ручному разбору: {len(manual_alerts_batch)} товаров")
         await notifier.send_batch_alert(manual_alerts_batch)
 
     if result["changes"]:
-        print(f"🚀 [Scheduler] AUTO скорректировал {len(result['changes'])} товаров")
+        print(f"🔒 [Scheduler] Price Lock вернул цены у {len(result['changes'])} товаров")
         await notifier.send_auto_report(result)
     else:
-        print("✅ [Scheduler] Фоновая оптимизация завершилась без изменений.")
+        print("✅ [Scheduler] Price Lock завершился без корректировок.")
 
 
 async def sync_finance_job():
-    """Ночная задача: скачивает отчет V5 за последние 7 дней для актуализации."""
-    print("🌙 [Scheduler] Ночная выгрузка отчета V5...")
+    """Ночная задача: скачивает финансовый отчет через актуальный finance/v1 API."""
+    print("🌙 [Scheduler] Ночная выгрузка финансового отчета...")
     async with aiohttp.ClientSession() as session:
         try:
             async with session.post(f"{BACKEND_URL}/analytics/sync_finance", json={"days": 7}) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    print(f"✅ [Scheduler] Отчет V5 обновлен! Строк: {data.get('total_found', 0)}")
+                    print(f"✅ [Scheduler] Финансы обновлены. Новых строк: {data.get('new_records', 0)}")
                 else:
-                    print(f"❌ [Scheduler] Ошибка выгрузки V5: {await resp.text()}")
+                    print(f"❌ [Scheduler] Ошибка выгрузки финансов: {await resp.text()}")
         except Exception as exc:
             print(f"💥 [Scheduler] Ошибка соединения: {exc}")
 
 
 async def sync_items_job():
-    """Задача: обновляет базу товаров (новые карточки, фото, названия)."""
     print("🔄 [Scheduler] Фоновое обновление номенклатуры WB...")
     async with aiohttp.ClientSession() as session:
         try:

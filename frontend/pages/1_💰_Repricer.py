@@ -1,210 +1,237 @@
-import streamlit as st
-import pandas as pd
-from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, ColumnsAutoSizeMode
-import time
 import os
 import sys
+import time
+from typing import Any
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+import pandas as pd
+import streamlit as st
+from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, JsCode
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from utils.api_client import APIClient
+from utils.ui_theme import apply_fintech_theme, integer, money, render_header, render_metric_strip, section
 
-st.set_page_config(page_title="Умный Репрайсер", page_icon="💰", layout="wide")
+st.set_page_config(page_title="Price Lock", page_icon="🔒", layout="wide")
+apply_fintech_theme()
 
-st.title("💰 Умный Репрайсер")
-
-col_refresh, col_run, col_apply, col_spacer = st.columns([1, 1, 1, 2])
-
-with col_refresh:
-    if st.button("🔄 Обновить данные", use_container_width=True):
+with st.sidebar:
+    st.markdown("### Price Lock")
+    if st.button("Обновить", use_container_width=True, key="repricer_refresh_sidebar"):
         st.rerun()
-
-with col_run:
-    if st.button("▶️ Запустить авто-цикл", use_container_width=True):
-        with st.spinner("Запускаю фоновую оптимизацию..."):
+    if st.button("Проверить сейчас", type="primary", use_container_width=True, key="repricer_run_sidebar"):
+        with st.spinner("Проверяю фиксированные цены..."):
             result = APIClient.run_auto_now()
             if result:
-                st.success(
-                    f"Цикл завершен. Проверено {result.get('checked_items', 0)} товаров, изменено {result.get('changed_items', 0)}."
-                )
-                time.sleep(1.2)
+                st.success(f"Проверено: {result.get('checked_items', 0)} · исправлено: {result.get('changed_items', 0)}")
+                time.sleep(1.1)
                 st.rerun()
 
-# --- 1. ЗАГРУЗКА И ПОДГОТОВКА ДАННЫХ ---
+render_header(
+    title="Price Lock",
+    subtitle="Автоматический контур возвращает только продавцовую цену WB к зафиксированному значению. Экономические рекомендации не применяются без ручного решения.",
+    overline="WB price control",
+)
+
 items_data = APIClient.get_repricer_status()
 automation_status = APIClient.get_automation_status()
 history_payload = APIClient.get_repricer_history(limit=25)
 history_data = history_payload.get("events", [])
 
 if not items_data:
-    st.info("Нет данных для отображения.")
+    st.info("Нет данных для отображения. Импортируйте товары в настройках.")
     st.stop()
 
 df = pd.DataFrame(items_data)
-selected = []
-
-# Считаем визуальную дельту (процент изменения цены)
-def calculate_delta(row):
-    old = row.get('current_price_retail', 0)
-    new = row.get('recommended_price_retail', 0)
-    if not old or old == 0 or not new or new == 0:
-        return "⚪ 0%"
-    pct = ((new - old) / old) * 100
-    if pct > 0: return f"🟢 +{pct:.1f}%"
-    elif pct < 0: return f"🔴 {pct:.1f}%"
-    return "⚪ 0%"
-
-df['price_delta'] = df.apply(calculate_delta, axis=1)
-
 last_run = automation_status.get("last_run") or {}
-last_run_at = last_run.get("finished_at") or last_run.get("started_at") or "Еще не запускался"
-if last_run_at != "Еще не запускался":
+last_run_at = last_run.get("finished_at") or last_run.get("started_at") or "Ещё не запускался"
+if last_run_at != "Ещё не запускался":
     try:
         last_run_at = pd.to_datetime(last_run_at).strftime("%d.%m.%Y %H:%M")
     except Exception:
         pass
 
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("Последний запуск", last_run_at)
-m2.metric("Ждут авто-коррекции", automation_status.get("pending_auto_items", 0))
-m3.metric("В ручном разборе", automation_status.get("manual_review_items", 0))
-m4.metric("Изменено в цикле", last_run.get("changed_items", 0))
-
-strategy_label = automation_status.get("strategy_label", "Protect Margin")
-strategy_description = automation_status.get(
-    "strategy_description",
-    "Фоновый режим повышает цену только у товаров с прибылью ниже цели и не снижает цену у сверхприбыльных SKU.",
+render_metric_strip(
+    [
+        {"label": "Последняя проверка", "value": last_run_at, "note": last_run.get("status", "нет статуса")},
+        {"label": "С Price Lock", "value": integer(automation_status.get("locked_items", automation_status.get("auto_mode_items", 0))), "note": "готовы к контролю"},
+        {"label": "Отклонения", "value": integer(automation_status.get("pending_auto_items", 0)), "note": "требуют возврата цены"},
+        {"label": "Рекомендации", "value": integer(automation_status.get("manual_review_items", 0)), "note": "не применяются автоматически"},
+        {"label": "Товаров", "value": integer(len(df)), "note": "в текущей базе"},
+    ]
 )
-st.info(f"Стратегия авто-режима: `{strategy_label}`. {strategy_description}")
 
 if last_run.get("status") == "failed":
-    st.error(f"Последний фоновый цикл завершился ошибкой: {last_run.get('error_message', 'неизвестно')}")
-
-# --- 2. ПРЕСЕТЫ (ВИДЫ ОТОБРАЖЕНИЯ) ---
-tab_all, tab_bad, tab_auto, tab_setup = st.tabs([
-    "📋 Все товары",
-    "🔴 Требуют внимания",
-    "🤖 На автопилоте",
-    "⚪ Не готовы к авто",
-])
-
-def render_grid(dataframe, key_suffix):
-    """Функция для отрисовки AgGrid с нужными настройками"""
-    if dataframe.empty:
-        st.success("В этой категории нет товаров.")
-        return None
-
-    gb = GridOptionsBuilder.from_dataframe(dataframe)
-    gb.configure_default_column(resizable=True, filterable=True, sortable=True)
-
-    # Скрываем лишнее
-    for col in ["photo_url", "current_price_retail"]:
-        gb.configure_column(col, hide=True)
-
-    # Настраиваем колонки с ПОДСКАЗКАМИ (headerTooltip)
-    gb.configure_column("nm_id", header_name="Артикул", width=100, pinned='left')
-    gb.configure_column("name", header_name="Товар", width=250, pinned='left', headerTooltip="Название из карточки WB")
-    gb.configure_column("mode", header_name="Режим", width=95)
-    gb.configure_column("target_profit", header_name="Цель", type=["numericColumn"], valueFormatter="x.toLocaleString() + ' ₽'")
-    gb.configure_column("wb_discount", header_name="Скидка WB %", type=["numericColumn"], headerTooltip="Текущая скидка продавца, которую вернул WB")
-    gb.configure_column("target_discount", header_name="Целевая скидка %", type=["numericColumn"], headerTooltip="Скидка продавца, которую репрайсер будет отправлять вместе с ценой")
-    gb.configure_column("current_price", header_name="Сейчас (Клиент)", type=["numericColumn"], valueFormatter="x.toLocaleString() + ' ₽'", headerTooltip="Текущая цена для покупателя на сайте")
-    gb.configure_column("current_profit", header_name="Прибыль (Факт)", type=["numericColumn"], valueFormatter="x.toLocaleString() + ' ₽'", headerTooltip="Чистая прибыль с одной штуки при текущей цене")
-    
-    # Рекомендации
-    gb.configure_column("recommended_price_final", header_name="Новая (Клиент)", type=["numericColumn"], valueFormatter="x.toLocaleString() + ' ₽'", headerTooltip="Цена для клиента, которая даст целевую прибыль")
-    gb.configure_column("recommended_discount", header_name="Отправим скидку %", type=["numericColumn"], headerTooltip="Скидка продавца, которую отправим по API")
-    gb.configure_column("price_delta", header_name="Изменение", width=120, headerTooltip="На сколько процентов изменится базовая цена")
-    gb.configure_column("recommended_price_retail", header_name="🚀 Отправим на WB", type=["numericColumn"], valueFormatter="x.toLocaleString() + ' ₽'", cellStyle={'backgroundColor': '#e8f4f8', 'fontWeight': 'bold'}, headerTooltip="Базовая цена до скидки. Именно её мы пошлем по API.")
-    gb.configure_column("projected_profit", header_name="Прибыль после", type=["numericColumn"], valueFormatter="x.toLocaleString() + ' ₽'")
-    gb.configure_column("reason_label", header_name="Комментарий", width=180)
-    gb.configure_column("status", header_name="Статус", width=120)
-    
-    gb.configure_selection(selection_mode="multiple", use_checkbox=True)
-    grid_options = gb.build()
-
-    return AgGrid(
-        dataframe,
-        gridOptions=grid_options,
-        update_mode=GridUpdateMode.SELECTION_CHANGED,
-        columns_auto_size_mode=ColumnsAutoSizeMode.FIT_CONTENTS,
-        theme="streamlit",
-        key=f"grid_{key_suffix}"
+    st.markdown(f"<div class='note danger-note'>Последний цикл завершился ошибкой: {last_run.get('error_message', 'неизвестно')}</div>", unsafe_allow_html=True)
+else:
+    st.markdown(
+        f"<div class='note'>{automation_status.get('strategy_description', 'Price Lock удерживает зафиксированную цену WB.')}</div>",
+        unsafe_allow_html=True,
     )
 
-with tab_all:
-    grid_all = render_grid(df, "all")
-    selected = grid_all['selected_rows'] if grid_all else None
+status_style = JsCode(
+    """
+    function(params) {
+        const value = String(params.value || '').toLowerCase();
+        if (value.includes('error') || value.includes('fail') || value.includes('critical')) {
+            return {'color': '#b91c1c', 'fontWeight': 800};
+        }
+        if (value.includes('manual') || value.includes('review') || value.includes('info')) {
+            return {'color': '#b45309', 'fontWeight': 800};
+        }
+        return {'color': '#047857', 'fontWeight': 800};
+    }
+    """
+)
+drift_style = JsCode(
+    """
+    function(params) {
+        if (params.value == null) return {};
+        if (Math.abs(Number(params.value)) > 0) return {'color': '#b91c1c', 'fontWeight': 800};
+        return {'color': '#047857', 'fontWeight': 800};
+    }
+    """
+)
 
-with tab_bad:
-    grid_bad = render_grid(df[df['status'] != 'OK'], "bad")
-    # Если мы на этой вкладке, логично использовать её выделение
-    if grid_bad and grid_bad['selected_rows'] is not None and len(grid_bad['selected_rows']) > 0:
-        selected = grid_bad['selected_rows']
 
-with tab_auto:
-    grid_auto = render_grid(df[df['mode'] == 'auto'], "auto")
-    if grid_auto and grid_auto['selected_rows'] is not None and len(grid_auto['selected_rows']) > 0:
-        selected = grid_auto['selected_rows']
+def prepare_table(dataframe: pd.DataFrame) -> pd.DataFrame:
+    columns = {
+        "nm_id": "nmID",
+        "name": "Товар",
+        "price_lock_enabled": "Lock",
+        "current_price": "Текущая",
+        "locked_final_price": "Фикс.",
+        "price_drift": "Откл.",
+        "price_tolerance_rub": "Допуск",
+        "wb_discount": "WB %",
+        "locked_discount": "Фикс. %",
+        "target_base_price": "База WB",
+        "current_profit": "Прибыль",
+        "recommended_price_final": "Рекоменд.",
+        "min_viable_price": "Мин. цена",
+        "status": "Статус",
+        "reason_label": "Причина",
+        "recommendation_reason_text": "Комментарий",
+    }
+    visible = [col for col in columns if col in dataframe.columns]
+    table = dataframe[visible].rename(columns=columns).copy()
+    for col in ["Текущая", "Фикс.", "Откл.", "Допуск", "База WB", "Прибыль", "Рекоменд.", "Мин. цена"]:
+        if col in table.columns:
+            table[col] = pd.to_numeric(table[col], errors="coerce").round(0)
+    for col in ["WB %", "Фикс. %"]:
+        if col in table.columns:
+            table[col] = pd.to_numeric(table[col], errors="coerce").round(0)
+    return table
 
-with tab_setup:
-    grid_setup = render_grid(df[df['auto_ready'] != True], "setup")
-    if grid_setup and grid_setup['selected_rows'] is not None and len(grid_setup['selected_rows']) > 0:
-        selected = grid_setup['selected_rows']
 
-# --- 3. ПРИМЕНЕНИЕ ИЗМЕНЕНИЙ ---
-with col_apply:
-    if selected is not None and len(selected) > 0:
-        if isinstance(selected, pd.DataFrame):
-            selected_list = selected.to_dict('records')
-        else:
-            selected_list = selected
-            
-        if st.button(f"✅ Применить ({len(selected_list)} шт)", type="primary", use_container_width=True):
-            to_update = [
-                {
-                    "nm_id": int(r['nm_id']),
-                    "new_price": int(r['recommended_price_retail']),
-                    "new_discount": int(r.get('recommended_discount', r.get('target_discount', r.get('wb_discount', 0))) or 0),
-                }
-                for r in selected_list
-                if r.get('recommended_price_retail', 0) > 0
-            ]
-            if to_update:
-                with st.spinner("Отправка на WB..."):
-                    if APIClient.batch_update_prices(to_update):
-                        st.success("Цены обновлены!")
+def render_grid(dataframe: pd.DataFrame, key_suffix: str) -> list[dict[str, Any]]:
+    if dataframe.empty:
+        st.success("В этой категории нет товаров.")
+        return []
+
+    table = prepare_table(dataframe)
+    builder = GridOptionsBuilder.from_dataframe(table)
+    builder.configure_default_column(resizable=True, filterable=True, sortable=True, editable=False, wrapHeaderText=True, autoHeaderHeight=True)
+    builder.configure_selection(selection_mode="multiple", use_checkbox=True)
+    builder.configure_grid_options(rowHeight=42, headerHeight=44, enableCellTextSelection=True, ensureDomOrder=True, suppressHorizontalScroll=False)
+    builder.configure_column("nmID", pinned="left", width=96, minWidth=96)
+    builder.configure_column("Товар", pinned="left", width=255, minWidth=220, tooltipField="Товар")
+    builder.configure_column("Lock", width=82, minWidth=78)
+    for col in ["Текущая", "Фикс.", "Откл.", "Допуск", "База WB", "Прибыль", "Рекоменд.", "Мин. цена"]:
+        if col in table.columns:
+            builder.configure_column(col, width=112, type=["numericColumn"], valueFormatter="x == null ? '' : x.toLocaleString('ru-RU') + ' ₽'")
+    if "Откл." in table.columns:
+        builder.configure_column("Откл.", width=102, type=["numericColumn"], valueFormatter="x == null ? '' : x.toLocaleString('ru-RU') + ' ₽'", cellStyle=drift_style)
+    for col in ["WB %", "Фикс. %"]:
+        if col in table.columns:
+            builder.configure_column(col, width=88, type=["numericColumn"], valueFormatter="x == null ? '' : x.toLocaleString('ru-RU') + ' %'")
+    if "Статус" in table.columns:
+        builder.configure_column("Статус", width=105, cellStyle=status_style)
+    if "Причина" in table.columns:
+        builder.configure_column("Причина", width=160, tooltipField="Причина")
+    if "Комментарий" in table.columns:
+        builder.configure_column("Комментарий", width=330, tooltipField="Комментарий", flex=1)
+
+    grid_response = AgGrid(
+        table,
+        gridOptions=builder.build(),
+        update_mode=GridUpdateMode.SELECTION_CHANGED,
+        theme="balham",
+        height=520,
+        allow_unsafe_jscode=True,
+        fit_columns_on_grid_load=False,
+        key=f"repricer_grid_{key_suffix}",
+    )
+    selected = grid_response.get("selected_rows", [])
+    return selected if isinstance(selected, list) else []
+
+
+def render_apply_selected(selected_rows: list[dict[str, Any]], source_df: pd.DataFrame, key_suffix: str) -> None:
+    button_key = f"repricer_apply_fixed_{key_suffix}"
+    disabled_key = f"repricer_apply_disabled_{key_suffix}"
+    if selected_rows:
+        if st.button(f"Вернуть фиксированную цену ({len(selected_rows)} шт.)", type="primary", use_container_width=True, key=button_key):
+            selected_ids = {int(row.get("nmID")) for row in selected_rows if row.get("nmID") is not None}
+            updates = []
+            for _, row in source_df[source_df["nm_id"].isin(selected_ids)].iterrows():
+                if pd.notna(row.get("target_base_price")) and pd.notna(row.get("locked_discount")):
+                    updates.append(
+                        {
+                            "nm_id": int(row["nm_id"]),
+                            "new_price": int(float(row["target_base_price"])),
+                            "new_discount": int(float(row["locked_discount"])),
+                        }
+                    )
+            if updates:
+                with st.spinner("Отправка задачи в WB..."):
+                    if APIClient.batch_update_prices(updates, source="manual_price_lock"):
+                        st.success("Задача отправлена в WB.")
                         time.sleep(1)
                         st.rerun()
+            else:
+                st.warning("У выбранных товаров нет target_base_price или locked_discount.")
     else:
-        st.button("✅ Применить (0 шт)", disabled=True, use_container_width=True)
+        st.button("Вернуть фиксированную цену (0)", disabled=True, use_container_width=True, key=disabled_key)
 
-st.divider()
-st.subheader("🕘 История последних корректировок")
+section("Контроль фиксированной цены", "Выберите товары с отклонением и вручную отправьте возврат к locked_final_price. Фоновый режим делает то же автоматически по расписанию.")
+tab_all, tab_drift, tab_review, tab_setup = st.tabs(["Все товары", "Отклонения", "Ручной разбор", "Не готовы"])
+
+with tab_all:
+    selected = render_grid(df, "all")
+    render_apply_selected(selected, df, "all")
+with tab_drift:
+    drift_df = df[df.get("should_auto_update", False) == True] if "should_auto_update" in df.columns else df.iloc[0:0]
+    selected = render_grid(drift_df, "drift")
+    render_apply_selected(selected, drift_df, "drift")
+with tab_review:
+    review_df = df[df.get("needs_manual_action", False) == True] if "needs_manual_action" in df.columns else df.iloc[0:0]
+    selected = render_grid(review_df, "review")
+    render_apply_selected(selected, review_df, "review")
+with tab_setup:
+    if "auto_ready" in df.columns:
+        setup_df = df[(df["auto_ready"] == False) | (df.get("price_lock_enabled", False) == False)]
+    else:
+        setup_df = df[df.get("price_lock_enabled", False) == False] if "price_lock_enabled" in df.columns else df.iloc[0:0]
+    selected = render_grid(setup_df, "setup")
+    render_apply_selected(selected, setup_df, "setup")
+
+section("История корректировок")
 if history_data:
     history_df = pd.DataFrame(history_data)
-    history_df["created_at"] = pd.to_datetime(history_df["created_at"], errors="coerce").dt.strftime("%d.%m.%Y %H:%M")
-    history_df["old_price_retail"] = history_df["old_price_retail"].round(0)
-    history_df["new_price_retail"] = history_df["new_price_retail"].round(0)
-    history_df["old_profit"] = history_df["old_profit"].round(0)
-    history_df["new_profit"] = history_df["new_profit"].round(0)
+    if "created_at" in history_df.columns:
+        history_df["created_at"] = pd.to_datetime(history_df["created_at"], errors="coerce").dt.strftime("%d.%m.%Y %H:%M")
     history_df = history_df.rename(
         columns={
             "created_at": "Когда",
             "item_name": "Товар",
             "source": "Источник",
-            "old_price_retail": "Было",
-            "new_price_retail": "Стало",
-            "price_delta": "Δ цены",
-            "price_delta_percent": "Δ %",
-            "old_profit": "Прибыль до",
-            "new_profit": "Прибыль после",
+            "old_price_final": "Цена была",
+            "new_price_final": "Цена стала",
+            "old_discount": "Скидка была",
+            "new_discount": "Скидка стала",
             "reason_label": "Причина",
         }
     )
-    st.dataframe(
-        history_df[["Когда", "Товар", "Источник", "Было", "Стало", "Δ цены", "Δ %", "Прибыль до", "Прибыль после", "Причина"]],
-        use_container_width=True,
-        hide_index=True,
-    )
+    columns = [col for col in ["Когда", "Товар", "Источник", "Цена была", "Цена стала", "Скидка была", "Скидка стала", "Причина"] if col in history_df.columns]
+    st.dataframe(history_df[columns], use_container_width=True, hide_index=True, height=260)
 else:
-    st.info("История автокоррекций пока пуста.")
+    st.info("История корректировок пока пуста.")

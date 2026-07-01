@@ -1,21 +1,23 @@
 import os
+from typing import Any, Dict, List, Optional
+
 import requests
-from typing import List, Dict, Any, Optional
 import streamlit as st
 
 BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8111")
 
+
 class APIClient:
-    """Класс для взаимодействия с Бэкендом через REST API."""
-    
+    """Класс для взаимодействия с backend через REST API."""
+
     @staticmethod
-    def _get(endpoint: str, params: Optional[Dict[str, Any]] = None, timeout: int = 15) -> Any:
+    def _get(endpoint: str, params: Optional[Dict[str, Any]] = None, timeout: int = 20) -> Any:
         try:
             response = requests.get(f"{BACKEND_URL}{endpoint}", params=params, timeout=timeout)
             response.raise_for_status()
             return response.json()
-        except requests.RequestException as e:
-            st.error(f"⚠️ Ошибка API (GET {endpoint}): {e}")
+        except requests.RequestException as exc:
+            st.error(f"⚠️ Ошибка API (GET {endpoint}): {exc}")
             return None
 
     @staticmethod
@@ -23,17 +25,16 @@ class APIClient:
         endpoint: str,
         json_data: Optional[Any] = None,
         params: Optional[Dict[str, Any]] = None,
-        timeout: int = 60,
+        timeout: int = 90,
     ) -> Any:
         try:
             response = requests.post(f"{BACKEND_URL}{endpoint}", json=json_data, params=params, timeout=timeout)
             response.raise_for_status()
             return response.json()
-        except requests.RequestException as e:
-            st.error(f"⚠️ Ошибка API (POST {endpoint}): {e}")
+        except requests.RequestException as exc:
+            st.error(f"⚠️ Ошибка API (POST {endpoint}): {exc}")
             return None
 
-    # --- ITEMS (Товары) ---
     @classmethod
     def get_items(cls) -> List[Dict[str, Any]]:
         return cls._get("/items/") or []
@@ -48,9 +49,8 @@ class APIClient:
 
     @classmethod
     def import_from_wb(cls) -> bool:
-        return cls._post("/items/import_from_wb") is not None
+        return cls._post("/items/import_from_wb", timeout=120) is not None
 
-    # --- REPRICER (Цены) ---
     @classmethod
     def get_repricer_status(cls) -> List[Dict[str, Any]]:
         return cls._get("/repricer/status") or []
@@ -69,13 +69,36 @@ class APIClient:
 
     @classmethod
     def run_auto_now(cls) -> Dict[str, Any]:
-        return cls._post("/repricer/run_auto_now", timeout=120) or {}
+        return cls._post("/repricer/run_auto_now", timeout=180) or {}
 
-    # --- ANALYTICS (Финансы) ---
     @classmethod
     def sync_finance(cls, days: int = 90) -> Dict[str, Any]:
-        return cls._post("/analytics/sync_finance", json_data={"days": days}) or {}
+        return cls._post("/analytics/sync_finance", json_data={"days": days}, timeout=180) or {}
 
     @classmethod
     def get_finance_dashboard(cls) -> Dict[str, Any]:
-        return cls._get("/analytics/finance_dashboard") or {}
+        return cls._get("/analytics/finance_dashboard", timeout=60) or {}
+
+    @classmethod
+    def get_analytics_summary(cls, days: int = 30) -> Dict[str, Any]:
+        return cls._get("/analytics/summary", params={"days": days}, timeout=60) or {}
+
+    @classmethod
+    def get_unit_economics(cls, days: int = 30) -> List[Dict[str, Any]]:
+        payload = cls._get("/analytics/unit-economics", params={"days": days}, timeout=60) or {}
+        return payload.get("items", [])
+
+    @classmethod
+    def get_timeseries(cls, days: int = 30) -> List[Dict[str, Any]]:
+        payload = cls._get("/analytics/timeseries", params={"days": days}, timeout=60) or {}
+        return payload.get("points", [])
+
+    @classmethod
+    def get_pnl(cls, days: int = 30) -> List[Dict[str, Any]]:
+        payload = cls._get("/analytics/pnl", params={"days": days}, timeout=60) or {}
+        return payload.get("items", [])
+
+    @classmethod
+    def get_recommendations(cls, days: int = 30) -> List[Dict[str, Any]]:
+        payload = cls._get("/recommendations", params={"days": days}, timeout=60) or {}
+        return payload.get("recommendations", [])

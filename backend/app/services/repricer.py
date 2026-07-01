@@ -1,4 +1,3 @@
-import math
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List
 
@@ -9,32 +8,27 @@ from app import models
 from app.services import unit_economics
 from app.wb_client import wb
 
-PROFIT_TOLERANCE_RUB = 100
-MIN_AUTO_CHANGE_RUB = 10
-MIN_AUTO_CHANGE_PCT = 1.0
-AUTO_REPRICER_STRATEGY = "protect_margin"
-AUTO_REPRICER_STRATEGY_LABEL = "Protect Margin"
-AUTO_REPRICER_STRATEGY_DESCRIPTION = (
-    "Фоновый режим повышает цену только у товаров, где фактическая прибыль ниже целевой, "
-    "и не снижает цену у SKU с прибылью выше цели."
+PRICE_LOCK_STRATEGY = "fixed_final_price"
+PRICE_LOCK_STRATEGY_LABEL = "Fixed Final Price"
+PRICE_LOCK_STRATEGY_DESCRIPTION = (
+    "Фоновый режим автоматически исправляет только отклонение продавцовой цены WB "
+    "от зафиксированной цены. Рекомендации по экономике рассчитываются отдельно и "
+    "не применяются без ручного решения."
 )
 
 REASON_LABELS = {
     "inactive": "Товар выключен",
-    "manual_mode": "Ручной режим",
-    "missing_cost_price": "Нет себестоимости",
-    "missing_target_profit": "Не задана цель прибыли",
+    "price_lock_disabled": "Фиксация цены выключена",
+    "missing_locked_price": "Не задана фиксированная цена",
     "missing_live_price": "Нет актуальной цены WB",
-    "invalid_economics": "Комиссия и налог дают некорректную формулу",
-    "within_tolerance": "Отклонение в пределах допуска",
-    "above_target_hold": "Прибыль выше цели: цену не снижаем автоматически",
-    "price_already_optimal": "Цена уже близка к расчетной",
-    "change_below_threshold": "Изменение слишком маленькое",
-    "target_profit_gap": "Цена ниже цели по прибыли",
-    "min_price_floor_applied": "Ограничено минимальной ценой",
-    "max_price_ceiling": "Расчет выше верхнего порога цены",
-    "discount_drift": "Скидка WB отличается от целевой",
-    "invalid_target_discount": "Некорректная целевая скидка",
+    "invalid_locked_discount": "Некорректная фиксированная скидка",
+    "within_tolerance": "Цена в пределах допуска",
+    "price_lock_drift": "Цена WB ушла от фиксированной",
+    "profit_below_minimum": "Прибыль ниже минимального порога",
+    "profit_below_desired": "Прибыль ниже желательной",
+    "hold_locked_price": "Зафиксированную цену оставить",
+    "economics_above_price_ceiling": "Экономика не сходится в ценовом потолке",
+    "manual_apply": "Ручное применение",
 }
 
 
@@ -42,19 +36,16 @@ def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _final_price_from_retail(retail_price: float, discount: int) -> float:
-    factor = 1 - ((discount or 0) / 100)
-    if factor <= 0:
-        return float(retail_price or 0)
-    return float(retail_price or 0) * factor
+def _serialize_dt(value: datetime | None) -> str | None:
+    return value.isoformat() if value else None
+
+
+def _reason_label(code: str | None) -> str:
+    return REASON_LABELS.get(code or "", code or "")
 
 
 def _normalize_discount(discount: int | float | None) -> int:
-    try:
-        value = int(float(discount if discount is not None else 0))
-    except (TypeError, ValueError):
-        value = 0
-    return max(0, min(value, 99))
+    return unit_economics.normalize_discount(discount)
 
 
 def _discount_is_valid(discount: int | float | None) -> bool:
@@ -65,36 +56,31 @@ def _discount_is_valid(discount: int | float | None) -> bool:
     return 0 <= value <= 99
 
 
-def _target_discount(item: models.Item) -> int:
-    raw_discount = item.target_discount if item.target_discount is not None else item.wb_discount
+def _locked_discount(item: models.Item) -> int:
+    raw_discount = item.locked_discount
+    if raw_discount is None:
+        raw_discount = item.target_discount if item.target_discount is not None else item.wb_discount
     return _normalize_discount(raw_discount)
+
+
+def _locked_final_price(item: models.Item) -> float:
+    if float(item.locked_final_price or 0) > 0:
+        return float(item.locked_final_price or 0)
+    return float(item.wb_price_final or 0)
 
 
 def _current_profit(item: models.Item, final_price: float | None = None) -> float:
     effective_final = float(final_price if final_price is not None else (item.wb_price_final or 0))
-    return (
-        effective_final
-        - float(item.cost_price or 0)
-        - float(item.logistics_cost or 0)
-        - (effective_final * float(item.wb_commission or 0))
-        - (effective_final * float(item.tax_rate or 0))
+    return unit_economics.calculate_profit_at_price(
+        final_price=effective_final,
+        cost_price=float(item.cost_price or 0),
+        logistics=float(item.logistics_cost or 0),
+        tax_rate=float(item.tax_rate or 0),
+        commission=float(item.wb_commission or 0),
+        return_cost_per_unit=float(item.return_cost_per_unit or 0),
+        ads_cost_per_unit=float(item.ads_cost_per_unit or 0),
+        overhead_per_unit=float(item.overhead_per_unit or 0),
     )
-
-
-def _rounded_floor_price(price: float) -> int:
-    return int(math.ceil(float(price or 0) / 10) * 10)
-
-
-def _rounded_cap_price(price: float) -> int:
-    return max(0, int(math.floor(float(price or 0) / 10) * 10))
-
-
-def _reason_label(code: str | None) -> str:
-    return REASON_LABELS.get(code or "", code or "")
-
-
-def _serialize_dt(value: datetime | None) -> str | None:
-    return value.isoformat() if value else None
 
 
 def _serialize_run(run: models.RepricerRun | None) -> Dict[str, Any] | None:
@@ -147,129 +133,115 @@ def build_item_decision(item: models.Item) -> Dict[str, Any]:
     current_price_retail = float(item.wb_price_base or 0)
     current_price_final = float(item.wb_price_final or 0)
     current_discount = _normalize_discount(item.wb_discount)
-    target_discount = _target_discount(item)
-    discount_delta = target_discount - current_discount
-    discount_drift = discount_delta != 0
+    locked_discount = _locked_discount(item)
+    locked_final_price = _locked_final_price(item)
+    tolerance = float(item.price_tolerance_rub or 50)
+    target_base_price = unit_economics.base_price_for_final(locked_final_price, locked_discount)
+    target_final_from_base = unit_economics.final_price_from_base(target_base_price, locked_discount)
+    price_drift = current_price_final - locked_final_price
+    abs_drift = abs(price_drift)
+    discount_delta = locked_discount - current_discount
+
     current_profit = _current_profit(item, current_price_final)
-
-    issues: List[str] = []
-    if not item.is_active:
-        issues.append("inactive")
-    if float(item.cost_price or 0) <= 0:
-        issues.append("missing_cost_price")
-    if float(item.target_profit or 0) <= 0:
-        issues.append("missing_target_profit")
-    if current_price_retail <= 0 or current_price_final <= 0:
-        issues.append("missing_live_price")
-    if item.target_discount is not None and not _discount_is_valid(item.target_discount):
-        issues.append("invalid_target_discount")
-
-    optimal = unit_economics.calculate_optimal_price(
-        target_profit=float(item.target_profit or 0),
+    min_profit = float(item.min_profit_rub or 0)
+    desired_profit = float(item.desired_profit_rub or item.target_profit or 0)
+    recommendation = unit_economics.build_price_recommendation(
+        locked_final_price=locked_final_price,
+        locked_discount=locked_discount,
+        current_profit_per_unit=current_profit,
+        min_profit_rub=min_profit,
+        desired_profit_rub=desired_profit,
         cost_price=float(item.cost_price or 0),
         logistics=float(item.logistics_cost or 0),
         tax_rate=float(item.tax_rate or 0),
         commission=float(item.wb_commission or 0),
-        current_discount=target_discount,
+        return_cost_per_unit=float(item.return_cost_per_unit or 0),
+        ads_cost_per_unit=float(item.ads_cost_per_unit or 0),
+        overhead_per_unit=float(item.overhead_per_unit or 0),
+        max_final_price=float(item.max_price or 0),
     )
 
-    if optimal.get("error"):
-        issues.append("invalid_economics")
+    issues: List[str] = []
+    if not item.is_active:
+        issues.append("inactive")
+    if not item.price_lock_enabled:
+        issues.append("price_lock_disabled")
+    if locked_final_price <= 0:
+        issues.append("missing_locked_price")
+    if current_price_retail <= 0 or current_price_final <= 0:
+        issues.append("missing_live_price")
+    if not _discount_is_valid(locked_discount):
+        issues.append("invalid_locked_discount")
 
-    recommended_price_retail = int(optimal.get("recommended_retail_price") or 0)
-    recommended_price_final = float(optimal.get("recommended_final_price") or 0)
-    floor_applied = False
-
-    if float(item.min_price or 0) > 0 and recommended_price_retail > 0 and recommended_price_retail < float(item.min_price):
-        recommended_price_retail = _rounded_floor_price(float(item.min_price))
-        recommended_price_final = _final_price_from_retail(recommended_price_retail, target_discount)
-        floor_applied = True
-
-    max_price = float(item.max_price or 0)
-    ceiling_applied = False
-    if max_price > 0 and recommended_price_retail > max_price:
-        recommended_price_retail = _rounded_cap_price(max_price)
-        recommended_price_final = _final_price_from_retail(recommended_price_retail, target_discount)
-        issues.append("max_price_ceiling")
-        ceiling_applied = True
-
-    projected_profit = _current_profit(item, recommended_price_final) if recommended_price_retail > 0 else current_profit
-    profit_gap = float(item.target_profit or 0) - current_profit
-    price_delta = recommended_price_retail - current_price_retail
-    price_delta_pct = (price_delta / current_price_retail * 100) if current_price_retail > 0 else 0.0
-    final_price_delta = recommended_price_final - current_price_final
-    final_price_delta_pct = (final_price_delta / current_price_final * 100) if current_price_final > 0 else 0.0
-
-    status = "⚪ SETUP"
-    if not issues:
-        status = "OK" if abs(profit_gap) <= PROFIT_TOLERANCE_RUB and not discount_drift else "⚠️ MISMATCH"
-
-    auto_ready = not issues and item.repricer_mode == "auto"
     should_auto_update = False
-    reason_code = issues[0] if issues else "within_tolerance"
+    reason_code = "within_tolerance"
+    if issues:
+        reason_code = issues[0]
+    elif abs_drift > tolerance or discount_delta != 0:
+        should_auto_update = True
+        reason_code = "price_lock_drift"
 
-    if auto_ready:
-        if profit_gap > PROFIT_TOLERANCE_RUB:
-            if final_price_delta <= 0 and not discount_drift:
-                reason_code = "price_already_optimal"
-            elif (
-                not discount_drift
-                and (abs(final_price_delta) < MIN_AUTO_CHANGE_RUB or abs(final_price_delta_pct) < MIN_AUTO_CHANGE_PCT)
-            ):
-                reason_code = "change_below_threshold"
-            else:
-                should_auto_update = True
-                reason_code = "target_profit_gap"
-        elif profit_gap < -PROFIT_TOLERANCE_RUB:
-            reason_code = "above_target_hold"
-        elif discount_drift:
-            should_auto_update = True
-            reason_code = "discount_drift"
-        else:
-            reason_code = "within_tolerance"
-    elif not issues and item.repricer_mode != "auto":
-        reason_code = "manual_mode"
+    needs_manual_action = recommendation["reason_code"] in {
+        "profit_below_minimum",
+        "profit_below_desired",
+        "economics_above_price_ceiling",
+    }
 
-    if floor_applied and should_auto_update:
-        reason_code = "min_price_floor_applied"
-
-    needs_manual_action = (
-        not issues
-        and item.repricer_mode == "manual"
-        and (profit_gap > PROFIT_TOLERANCE_RUB or discount_drift)
-        and recommended_price_retail > 0
-    )
+    auto_ready = not issues
+    status = "OK"
+    if issues:
+        status = "SETUP"
+    elif should_auto_update:
+        status = "PRICE_DRIFT"
+    elif needs_manual_action:
+        status = "REVIEW"
 
     return {
         "nm_id": item.nm_id,
         "name": item.name,
         "photo_url": item.photo_url,
-        "mode": item.repricer_mode,
+        "mode": "price_lock" if item.price_lock_enabled else "manual",
+        "repricer_mode": item.repricer_mode,
+        "pricing_strategy": item.pricing_strategy or PRICE_LOCK_STRATEGY,
         "is_active": item.is_active,
+        "price_lock_enabled": bool(item.price_lock_enabled),
         "auto_ready": auto_ready,
         "should_auto_update": should_auto_update,
         "needs_manual_action": needs_manual_action,
         "reason_code": reason_code,
         "reason_label": _reason_label(reason_code),
         "wb_discount": current_discount,
-        "target_discount": target_discount,
-        "recommended_discount": target_discount,
+        "locked_discount": locked_discount,
+        "target_discount": locked_discount,
+        "recommended_discount": locked_discount,
         "discount_delta": discount_delta,
         "current_price_retail": current_price_retail,
         "current_price": current_price_final,
+        "locked_final_price": locked_final_price,
+        "target_final_price": locked_final_price,
+        "target_base_price": target_base_price,
+        "target_final_from_base": target_final_from_base,
+        "price_tolerance_rub": tolerance,
+        "price_drift": round(price_drift, 0),
         "current_profit": round(current_profit, 0),
-        "target_profit": float(item.target_profit or 0),
-        "profit_gap": round(profit_gap, 0),
-        "recommended_price_final": recommended_price_final,
-        "recommended_price_retail": recommended_price_retail,
-        "projected_profit": round(projected_profit, 0),
-        "price_delta": round(price_delta, 0),
-        "price_delta_pct": round(price_delta_pct, 2),
-        "final_price_delta": round(final_price_delta, 0),
-        "final_price_delta_pct": round(final_price_delta_pct, 2),
+        "target_profit": desired_profit,
+        "desired_profit_rub": desired_profit,
+        "min_profit_rub": min_profit,
+        "profit_gap": round(min_profit - current_profit, 0),
+        "recommended_price_final": round(float(recommendation["recommended_final_price"]), 0),
+        "recommended_price_retail": round(float(recommendation["recommended_base_price"]), 0),
+        "projected_profit": round(float(recommendation["projected_profit_per_unit"]), 0),
+        "price_delta": round(target_base_price - current_price_retail, 0),
+        "price_delta_pct": round(((target_base_price - current_price_retail) / current_price_retail * 100), 2) if current_price_retail else 0,
+        "final_price_delta": round(target_final_from_base - current_price_final, 0),
+        "final_price_delta_pct": round(((target_final_from_base - current_price_final) / current_price_final * 100), 2) if current_price_final else 0,
         "min_price": float(item.min_price or 0),
-        "max_price": max_price,
-        "ceiling_applied": ceiling_applied,
+        "max_price": float(item.max_price or 0),
+        "min_viable_price": round(float(recommendation["min_viable_price"]), 0),
+        "recommendation_reason_code": recommendation["reason_code"],
+        "recommendation_reason_text": recommendation["reason_text"],
+        "recommendation_severity": recommendation["severity"],
+        "ceiling_applied": recommendation["reason_code"] == "economics_above_price_ceiling",
         "status": status,
     }
 
@@ -286,7 +258,7 @@ async def refresh_live_prices(db: AsyncSession, active_only: bool = True) -> Dic
 
     prices_map = wb.get_prices()
     if not prices_map:
-        raise RuntimeError("WB не вернул актуальные цены для фоновой оптимизации.")
+        raise RuntimeError("WB не вернул актуальные цены.")
 
     updated = 0
     matched = 0
@@ -300,6 +272,14 @@ async def refresh_live_prices(db: AsyncSession, active_only: bool = True) -> Dic
         item.wb_price_base = float(price_info.get("wb_price_base", 0) or 0)
         item.wb_discount = int(price_info.get("wb_discount", 0) or 0)
         item.wb_price_final = float(price_info.get("wb_price_final", 0) or 0)
+
+        if not item.locked_final_price:
+            item.locked_final_price = item.wb_price_final
+        if item.locked_discount is None:
+            item.locked_discount = item.wb_discount
+        if item.target_discount is None:
+            item.target_discount = item.locked_discount
+
         new_snapshot = (item.wb_price_base, item.wb_discount, item.wb_price_final)
         if new_snapshot != old_snapshot:
             updated += 1
@@ -319,7 +299,7 @@ async def build_repricer_report(db: AsyncSession, active_only: bool = True) -> L
         key=lambda row: (
             0 if row["should_auto_update"] else 1,
             0 if row["needs_manual_action"] else 1,
-            -abs(float(row["profit_gap"] or 0)),
+            -abs(float(row.get("price_drift") or 0)),
             int(row["nm_id"]),
         )
     )
@@ -355,9 +335,7 @@ async def apply_price_updates(
     if not normalized_updates:
         return []
 
-    result = await db.execute(
-        select(models.Item).filter(models.Item.nm_id.in_([u["nm_id"] for u in normalized_updates]))
-    )
+    result = await db.execute(select(models.Item).filter(models.Item.nm_id.in_([u["nm_id"] for u in normalized_updates])))
     items_by_nm_id = {item.nm_id: item for item in result.scalars().all()}
 
     planned_changes: List[Dict[str, Any]] = []
@@ -370,15 +348,11 @@ async def apply_price_updates(
         old_price_final = float(item.wb_price_final or 0)
         old_discount = _normalize_discount(item.wb_discount)
         new_price_retail = int(update["new_price"])
-        new_discount = (
-            _normalize_discount(update["new_discount"])
-            if update.get("new_discount") is not None
-            else _target_discount(item)
-        )
+        new_discount = _normalize_discount(update.get("new_discount") if update.get("new_discount") is not None else _locked_discount(item))
         if int(old_price_retail) == new_price_retail and old_discount == new_discount:
             continue
 
-        new_price_final = _final_price_from_retail(new_price_retail, new_discount)
+        new_price_final = unit_economics.final_price_from_base(new_price_retail, new_discount)
         old_profit = _current_profit(item, old_price_final)
         new_profit = _current_profit(item, new_price_final)
         price_delta = new_price_retail - old_price_retail
@@ -395,7 +369,7 @@ async def apply_price_updates(
                 "new_price_final": new_price_final,
                 "old_profit": old_profit,
                 "new_profit": new_profit,
-                "target_profit": float(item.target_profit or 0),
+                "target_profit": float(item.desired_profit_rub or item.target_profit or 0),
                 "wb_discount": new_discount,
                 "old_discount": old_discount,
                 "new_discount": new_discount,
@@ -409,15 +383,21 @@ async def apply_price_updates(
         return []
 
     wb_payload = [
-        {
-            "nmID": change["nm_id"],
-            "price": int(change["new_price_retail"]),
-            "discount": int(change["new_discount"]),
-        }
+        {"nmID": change["nm_id"], "price": int(change["new_price_retail"]), "discount": int(change["new_discount"])}
         for change in planned_changes
     ]
-    if not wb.update_prices(wb_payload):
+    upload_response = wb.update_prices(wb_payload)
+    if not upload_response or upload_response is False or (isinstance(upload_response, dict) and not upload_response.get("accepted", True)):
         raise RuntimeError("WB не принял пакет обновления цен.")
+
+    upload_task = models.WbPriceUploadTask(
+        upload_id=str(upload_response.get("upload_id")) if isinstance(upload_response, dict) and upload_response.get("upload_id") else None,
+        source=source,
+        status="created",
+        payload_json=wb_payload,
+        response_json=upload_response if isinstance(upload_response, dict) else {"accepted": True},
+    )
+    db.add(upload_task)
 
     persisted_changes: List[Dict[str, Any]] = []
     for change in planned_changes:
@@ -425,6 +405,7 @@ async def apply_price_updates(
         item.wb_price_base = change["new_price_retail"]
         item.wb_discount = change["new_discount"]
         item.wb_price_final = change["new_price_final"]
+        item.locked_discount = change["new_discount"]
         item.target_discount = change["new_discount"]
         item.updated_at = _now_utc()
 
@@ -434,6 +415,7 @@ async def apply_price_updates(
                 price_retail=change["new_price_retail"],
                 discount=change["wb_discount"],
                 final_price=change["new_price_final"],
+                source=source,
             )
         )
         db.add(
@@ -462,7 +444,7 @@ async def apply_price_updates(
     return persisted_changes
 
 
-async def run_background_repricing(db: AsyncSession, source: str = "scheduler_hourly") -> Dict[str, Any]:
+async def run_background_repricing(db: AsyncSession, source: str = "scheduler_price_lock") -> Dict[str, Any]:
     run = models.RepricerRun(source=source, status="running")
     db.add(run)
     await db.commit()
@@ -476,22 +458,22 @@ async def run_background_repricing(db: AsyncSession, source: str = "scheduler_ho
         auto_updates = [
             {
                 "nm_id": row["nm_id"],
-                "new_price": int(row["recommended_price_retail"]),
-                "new_discount": int(row["recommended_discount"]),
-                "reason": row["reason_code"],
+                "new_price": int(row["target_base_price"]),
+                "new_discount": int(row["locked_discount"]),
+                "reason": "price_lock_drift",
             }
             for row in report
             if row["should_auto_update"]
         ]
         manual_candidates = [row for row in report if row["needs_manual_action"]]
         auto_ready_items = [row for row in report if row["auto_ready"]]
-        skipped_items = [row for row in report if not row["should_auto_update"] and not row["needs_manual_action"]]
+        skipped_items = [row for row in report if not row["should_auto_update"]]
 
         changes = await apply_price_updates(
             db,
             auto_updates,
             source=source,
-            default_reason="target_profit_gap",
+            default_reason="price_lock_drift",
             run_id=run.id,
         )
 
@@ -532,12 +514,7 @@ async def run_background_repricing(db: AsyncSession, source: str = "scheduler_ho
         raise
 
 
-async def get_recent_events(
-    db: AsyncSession,
-    *,
-    limit: int = 20,
-    source: str | None = None,
-) -> List[Dict[str, Any]]:
+async def get_recent_events(db: AsyncSession, *, limit: int = 20, source: str | None = None) -> List[Dict[str, Any]]:
     query = select(models.RepricerEvent).order_by(models.RepricerEvent.created_at.desc(), models.RepricerEvent.id.desc())
     if source:
         query = query.filter(models.RepricerEvent.source == source)
@@ -554,21 +531,22 @@ async def get_automation_status(db: AsyncSession) -> Dict[str, Any]:
     last_run = run_result.scalars().first()
 
     report = await build_repricer_report(db, active_only=True)
-    auto_mode_items = [row for row in report if row["mode"] == "auto"]
+    locked_items = [row for row in report if row["price_lock_enabled"]]
     auto_ready_items = [row for row in report if row["auto_ready"]]
     pending_auto_items = [row for row in report if row["should_auto_update"]]
     manual_review_items = [row for row in report if row["needs_manual_action"]]
 
     return {
-        "strategy": AUTO_REPRICER_STRATEGY,
-        "strategy_label": AUTO_REPRICER_STRATEGY_LABEL,
-        "strategy_description": AUTO_REPRICER_STRATEGY_DESCRIPTION,
+        "strategy": PRICE_LOCK_STRATEGY,
+        "strategy_label": PRICE_LOCK_STRATEGY_LABEL,
+        "strategy_description": PRICE_LOCK_STRATEGY_DESCRIPTION,
         "schedule_interval_minutes": 60,
         "active_items": len(report),
-        "auto_mode_items": len(auto_mode_items),
+        "locked_items": len(locked_items),
+        "auto_mode_items": len(locked_items),
         "auto_ready_items": len(auto_ready_items),
         "pending_auto_items": len(pending_auto_items),
         "manual_review_items": len(manual_review_items),
         "last_run": _serialize_run(last_run),
-        "recent_changes": await get_recent_events(db, limit=5, source="scheduler_hourly"),
+        "recent_changes": await get_recent_events(db, limit=5, source="scheduler_price_lock"),
     }
