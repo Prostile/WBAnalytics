@@ -25,7 +25,7 @@ ITEM_COLUMNS = [
     "ALTER TABLE items ADD COLUMN IF NOT EXISTS pricing_strategy VARCHAR DEFAULT 'fixed_final_price'",
     "UPDATE items SET target_discount = COALESCE(target_discount, wb_discount, 0)",
     "UPDATE items SET locked_discount = COALESCE(locked_discount, target_discount, wb_discount, 0)",
-    "UPDATE items SET locked_final_price = COALESCE(NULLIF(locked_final_price, 0), wb_price_final, 0)",
+    "UPDATE items SET locked_final_price = COALESCE(NULLIF(locked_final_price, 0), wb_price_base, 0)",
     "UPDATE items SET price_tolerance_rub = COALESCE(price_tolerance_rub, 50)",
     "UPDATE items SET desired_profit_rub = COALESCE(NULLIF(desired_profit_rub, 0), target_profit, 0)",
     "UPDATE items SET min_profit_rub = COALESCE(min_profit_rub, 0)",
