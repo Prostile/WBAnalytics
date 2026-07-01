@@ -133,8 +133,8 @@ async def upsert_items_payload(items: List[schemas.ItemCreate], db: AsyncSession
             db_item.desired_profit_rub = db_item.target_profit
         if db_item.locked_discount is None:
             db_item.locked_discount = db_item.target_discount if db_item.target_discount is not None else db_item.wb_discount
-        if not db_item.locked_final_price and db_item.wb_price_final:
-            db_item.locked_final_price = db_item.wb_price_final
+        if not db_item.locked_final_price and db_item.wb_price_base:
+            db_item.locked_final_price = db_item.wb_price_base
 
         persisted.append(db_item)
 
@@ -170,7 +170,7 @@ async def import_items_from_wb(db: AsyncSession = Depends(database.get_db)):
             db_item.wb_discount = price_info["wb_discount"]
             db_item.wb_price_final = price_info["wb_price_final"]
             if not db_item.locked_final_price:
-                db_item.locked_final_price = db_item.wb_price_final
+                db_item.locked_final_price = db_item.wb_price_base
             if db_item.locked_discount is None:
                 db_item.locked_discount = db_item.wb_discount
             if db_item.target_discount is None:
@@ -187,7 +187,7 @@ async def import_items_from_wb(db: AsyncSession = Depends(database.get_db)):
                 wb_price_final=price_info["wb_price_final"],
                 target_discount=price_info["wb_discount"],
                 locked_discount=price_info["wb_discount"],
-                locked_final_price=price_info["wb_price_final"],
+                locked_final_price=price_info["wb_price_base"],
                 price_lock_enabled=True,
                 pricing_strategy="fixed_final_price",
                 price_tolerance_rub=50,
@@ -571,8 +571,9 @@ def compute_analytics(rows: List[models.FinanceRecord], items: Dict[int, models.
         bucket["return_rate_pct"] = (bucket["returns_qty"] / total_order_like_qty * 100) if total_order_like_qty else 0.0
         bucket["profit_per_unit"] = (bucket["profit"] / sales_qty) if sales_qty else 0.0
         if item:
-            locked_price = float(item.locked_final_price or item.wb_price_final or 0)
+            locked_base_price = float(item.locked_final_price or item.wb_price_base or 0)
             locked_discount = int(item.locked_discount if item.locked_discount is not None else item.wb_discount or 0)
+            locked_price = unit_economics.final_price_from_base(locked_base_price, locked_discount)
             actual_logistics = (bucket["logistics"] / sales_qty) if sales_qty else float(item.logistics_cost or 0)
             rec = unit_economics.build_price_recommendation(
                 locked_final_price=locked_price,
@@ -598,6 +599,7 @@ def compute_analytics(rows: List[models.FinanceRecord], items: Dict[int, models.
                     "nm_id": nm_id,
                     "name": item.name,
                     "current_final_price": float(item.wb_price_final or 0),
+                    "locked_price_base": locked_base_price,
                     "locked_final_price": locked_price,
                     "recommended_final_price": rec["recommended_final_price"],
                     "recommended_base_price": rec["recommended_base_price"],

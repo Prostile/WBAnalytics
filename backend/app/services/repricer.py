@@ -9,11 +9,12 @@ from app.services import unit_economics
 from app.wb_client import wb
 
 PRICE_LOCK_STRATEGY = "fixed_final_price"
-PRICE_LOCK_STRATEGY_LABEL = "Fixed Final Price"
+PRICE_LOCK_STRATEGY_LABEL = "Fixed WB Price"
 PRICE_LOCK_STRATEGY_DESCRIPTION = (
-    "Фоновый режим автоматически исправляет только отклонение продавцовой цены WB "
-    "от зафиксированной цены. Рекомендации по экономике рассчитываются отдельно и "
-    "не применяются без ручного решения."
+    "Фоновый режим автоматически исправляет только отклонение базовой цены WB "
+    "и скидки продавца от зафиксированных значений. Итоговая продавцовая цена "
+    "после скидки рассчитывается отдельно. Рекомендации по экономике не применяются "
+    "без ручного решения."
 )
 
 REASON_LABELS = {
@@ -63,10 +64,24 @@ def _locked_discount(item: models.Item) -> int:
     return _normalize_discount(raw_discount)
 
 
-def _locked_final_price(item: models.Item) -> float:
+def _locked_base_price(item: models.Item) -> float:
+    """Return the fixed WB base/list price before seller discount.
+
+    The database field is still named ``locked_final_price`` for backward
+    compatibility with existing exports and saved settings. In the UI it must be
+    treated as ``Фикс. цена WB``: the base price sent to WB API together with
+    ``locked_discount``. The effective seller price is calculated as
+    ``locked_base_price * (1 - locked_discount / 100)``.
+    """
+
     if float(item.locked_final_price or 0) > 0:
         return float(item.locked_final_price or 0)
-    return float(item.wb_price_final or 0)
+    return float(item.wb_price_base or 0)
+
+
+def _locked_final_price(item: models.Item, locked_discount: int | None = None) -> float:
+    discount = _locked_discount(item) if locked_discount is None else locked_discount
+    return unit_economics.final_price_from_base(_locked_base_price(item), discount)
 
 
 def _current_profit(item: models.Item, final_price: float | None = None) -> float:
@@ -134,11 +149,13 @@ def build_item_decision(item: models.Item) -> Dict[str, Any]:
     current_price_final = float(item.wb_price_final or 0)
     current_discount = _normalize_discount(item.wb_discount)
     locked_discount = _locked_discount(item)
-    locked_final_price = _locked_final_price(item)
-    tolerance = float(item.price_tolerance_rub or 50)
-    target_base_price = unit_economics.base_price_for_final(locked_final_price, locked_discount)
+    locked_base_price = _locked_base_price(item)
+    target_base_price = int(round(locked_base_price))
     target_final_from_base = unit_economics.final_price_from_base(target_base_price, locked_discount)
-    price_drift = current_price_final - locked_final_price
+    locked_final_price = target_final_from_base
+    tolerance = float(item.price_tolerance_rub or 50)
+    price_drift = current_price_final - target_final_from_base
+    base_price_drift = current_price_retail - target_base_price
     abs_drift = abs(price_drift)
     discount_delta = locked_discount - current_discount
 
@@ -166,7 +183,7 @@ def build_item_decision(item: models.Item) -> Dict[str, Any]:
         issues.append("inactive")
     if not item.price_lock_enabled:
         issues.append("price_lock_disabled")
-    if locked_final_price <= 0:
+    if locked_base_price <= 0:
         issues.append("missing_locked_price")
     if current_price_retail <= 0 or current_price_final <= 0:
         issues.append("missing_live_price")
@@ -217,12 +234,14 @@ def build_item_decision(item: models.Item) -> Dict[str, Any]:
         "discount_delta": discount_delta,
         "current_price_retail": current_price_retail,
         "current_price": current_price_final,
+        "locked_price_base": target_base_price,
         "locked_final_price": locked_final_price,
         "target_final_price": locked_final_price,
         "target_base_price": target_base_price,
         "target_final_from_base": target_final_from_base,
         "price_tolerance_rub": tolerance,
         "price_drift": round(price_drift, 0),
+        "base_price_drift": round(base_price_drift, 0),
         "current_profit": round(current_profit, 0),
         "target_profit": desired_profit,
         "desired_profit_rub": desired_profit,
@@ -274,7 +293,7 @@ async def refresh_live_prices(db: AsyncSession, active_only: bool = True) -> Dic
         item.wb_price_final = float(price_info.get("wb_price_final", 0) or 0)
 
         if not item.locked_final_price:
-            item.locked_final_price = item.wb_price_final
+            item.locked_final_price = item.wb_price_base
         if item.locked_discount is None:
             item.locked_discount = item.wb_discount
         if item.target_discount is None:
