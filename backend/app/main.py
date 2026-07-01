@@ -369,7 +369,8 @@ def build_finance_record_from_row(row: Dict[str, Any]) -> Optional[models.Financ
 @app.post("/analytics/sync_finance")
 async def sync_finance(req: schemas.SyncRequest, db: AsyncSession = Depends(database.get_db)):
     date_to_dt = datetime.now(timezone.utc)
-    date_from_dt = date_to_dt - timedelta(days=max(1, min(req.days, 365)))
+    sync_days = max(1, min(req.days or 3650, 3650))
+    date_from_dt = date_to_dt - timedelta(days=sync_days)
     date_from = date_from_dt.strftime("%Y-%m-%d")
     date_to = date_to_dt.strftime("%Y-%m-%d")
 
@@ -414,8 +415,14 @@ async def sync_finance(req: schemas.SyncRequest, db: AsyncSession = Depends(data
 async def get_finance_records(db: AsyncSession, days: int = 30) -> Tuple[List[models.FinanceRecord], Dict[int, models.Item]]:
     result = await db.execute(select(models.FinanceRecord))
     rows = result.scalars().all()
-    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=max(1, min(days, 3650)))
-    filtered = [row for row in rows if (record_operation_date(row) is None or record_operation_date(row) >= cutoff)]
+    safe_days = max(0, min(days or 0, 3650))
+    if safe_days == 0:
+        filtered = rows
+    else:
+        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=safe_days)
+        # Для ограниченных периодов строки без даты не включаем: иначе 7/14/30 дней
+        # визуально дают одинаковый результат и фильтр кажется нерабочим.
+        filtered = [row for row in rows if (record_operation_date(row) is not None and record_operation_date(row) >= cutoff)]
 
     item_result = await db.execute(select(models.Item))
     items = {item.nm_id: item for item in item_result.scalars().all()}
@@ -612,12 +619,13 @@ def compute_analytics(rows: List[models.FinanceRecord], items: Dict[int, models.
 
     pnl = [
         {"name": "Выручка", "value": summary["gross_revenue"]},
-        {"name": "К перечислению", "value": summary["for_pay"]},
         {"name": "Комиссия WB", "value": -summary["wb_commission"]},
+        {"name": "Эквайринг", "value": -summary["acquiring"]},
         {"name": "Себестоимость", "value": -summary["cogs"]},
         {"name": "Логистика", "value": -summary["logistics"]},
-        {"name": "Хранение/приемка/удержания", "value": -(summary["storage"] + summary["acceptance"] + summary["deductions"])},
+        {"name": "Хранение/приёмка/удержания", "value": -(summary["storage"] + summary["acceptance"] + summary["deductions"])},
         {"name": "Штрафы", "value": -summary["penalties"]},
+        {"name": "Доплаты", "value": summary["additional_payment"]},
         {"name": "Реклама и накладные", "value": -(summary["ads"] + summary["overhead"])},
         {"name": "Налог", "value": -summary["tax"]},
         {"name": "Прибыль", "value": summary["net_profit"]},
@@ -662,31 +670,31 @@ async def get_finance_dashboard(db: AsyncSession = Depends(database.get_db)):
 
 
 @app.get("/analytics/summary")
-async def analytics_summary(days: int = Query(30, ge=1, le=3650), db: AsyncSession = Depends(database.get_db)):
+async def analytics_summary(days: int = Query(30, ge=0, le=3650), db: AsyncSession = Depends(database.get_db)):
     rows, items = await get_finance_records(db, days=days)
     return compute_analytics(rows, items)["summary"]
 
 
 @app.get("/analytics/unit-economics")
-async def analytics_unit_economics(days: int = Query(30, ge=1, le=3650), db: AsyncSession = Depends(database.get_db)):
+async def analytics_unit_economics(days: int = Query(30, ge=0, le=3650), db: AsyncSession = Depends(database.get_db)):
     rows, items = await get_finance_records(db, days=days)
     return {"items": compute_analytics(rows, items)["unit_economics"]}
 
 
 @app.get("/analytics/timeseries")
-async def analytics_timeseries(days: int = Query(30, ge=1, le=3650), db: AsyncSession = Depends(database.get_db)):
+async def analytics_timeseries(days: int = Query(30, ge=0, le=3650), db: AsyncSession = Depends(database.get_db)):
     rows, items = await get_finance_records(db, days=days)
     return {"points": compute_analytics(rows, items)["timeseries"]}
 
 
 @app.get("/analytics/pnl")
-async def analytics_pnl(days: int = Query(30, ge=1, le=3650), db: AsyncSession = Depends(database.get_db)):
+async def analytics_pnl(days: int = Query(30, ge=0, le=3650), db: AsyncSession = Depends(database.get_db)):
     rows, items = await get_finance_records(db, days=days)
     return {"items": compute_analytics(rows, items)["pnl"]}
 
 
 @app.get("/recommendations")
-async def get_recommendations(days: int = Query(30, ge=1, le=3650), db: AsyncSession = Depends(database.get_db)):
+async def get_recommendations(days: int = Query(30, ge=0, le=3650), db: AsyncSession = Depends(database.get_db)):
     rows, items = await get_finance_records(db, days=days)
     return {"recommendations": compute_analytics(rows, items)["recommendations"]}
 

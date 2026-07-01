@@ -9,7 +9,7 @@ from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, JsCode
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from utils.api_client import APIClient
-from utils.ui_theme import apply_fintech_theme, integer, money, render_header, render_metric_strip, section
+from utils.ui_theme import apply_fintech_theme, integer, money, render_header, render_metric_strip, section, selected_rows_to_records
 
 st.set_page_config(page_title="Price Lock", page_icon="🔒", layout="wide")
 apply_fintech_theme()
@@ -98,26 +98,18 @@ def prepare_table(dataframe: pd.DataFrame) -> pd.DataFrame:
         "nm_id": "nmID",
         "name": "Товар",
         "price_lock_enabled": "Lock",
-        "current_price": "Текущая",
-        "locked_final_price": "Фикс.",
-        "price_drift": "Откл.",
-        "price_tolerance_rub": "Допуск",
-        "wb_discount": "WB %",
-        "locked_discount": "Фикс. %",
-        "target_base_price": "База WB",
+        "current_price": "Текущая цена",
+        "locked_final_price": "Фикс. цена",
+        "price_drift": "Отклонение",
         "current_profit": "Прибыль",
-        "recommended_price_final": "Рекоменд.",
+        "recommended_price_final": "Рекоменд. цена",
         "min_viable_price": "Мин. цена",
         "status": "Статус",
-        "reason_label": "Причина",
         "recommendation_reason_text": "Комментарий",
     }
     visible = [col for col in columns if col in dataframe.columns]
     table = dataframe[visible].rename(columns=columns).copy()
-    for col in ["Текущая", "Фикс.", "Откл.", "Допуск", "База WB", "Прибыль", "Рекоменд.", "Мин. цена"]:
-        if col in table.columns:
-            table[col] = pd.to_numeric(table[col], errors="coerce").round(0)
-    for col in ["WB %", "Фикс. %"]:
+    for col in ["Текущая цена", "Фикс. цена", "Отклонение", "Прибыль", "Рекоменд. цена", "Мин. цена"]:
         if col in table.columns:
             table[col] = pd.to_numeric(table[col], errors="coerce").round(0)
     return table
@@ -130,44 +122,46 @@ def render_grid(dataframe: pd.DataFrame, key_suffix: str) -> list[dict[str, Any]
 
     table = prepare_table(dataframe)
     builder = GridOptionsBuilder.from_dataframe(table)
-    builder.configure_default_column(resizable=True, filterable=True, sortable=True, editable=False, wrapHeaderText=True, autoHeaderHeight=True)
+    builder.configure_default_column(
+        resizable=True,
+        filterable=True,
+        sortable=True,
+        editable=False,
+        wrapHeaderText=False,
+        autoHeaderHeight=False,
+        suppressSizeToFit=True,
+    )
     builder.configure_selection(selection_mode="multiple", use_checkbox=True)
-    builder.configure_grid_options(rowHeight=42, headerHeight=44, enableCellTextSelection=True, ensureDomOrder=True, suppressHorizontalScroll=False)
-    builder.configure_column("nmID", pinned="left", width=96, minWidth=96)
-    builder.configure_column("Товар", pinned="left", width=255, minWidth=220, tooltipField="Товар")
-    builder.configure_column("Lock", width=82, minWidth=78)
-    for col in ["Текущая", "Фикс.", "Откл.", "Допуск", "База WB", "Прибыль", "Рекоменд.", "Мин. цена"]:
+    builder.configure_grid_options(rowHeight=44, headerHeight=48, enableCellTextSelection=True, ensureDomOrder=True, suppressHorizontalScroll=False, tooltipShowDelay=150)
+    builder.configure_column("nmID", pinned="left", width=120, minWidth=110)
+    builder.configure_column("Товар", pinned="left", width=330, minWidth=280, tooltipField="Товар")
+    builder.configure_column("Lock", width=86, minWidth=80)
+    for col in ["Текущая цена", "Фикс. цена", "Рекоменд. цена", "Мин. цена", "Прибыль"]:
         if col in table.columns:
-            builder.configure_column(col, width=112, type=["numericColumn"], valueFormatter="x == null ? '' : x.toLocaleString('ru-RU') + ' ₽'")
-    if "Откл." in table.columns:
-        builder.configure_column("Откл.", width=102, type=["numericColumn"], valueFormatter="x == null ? '' : x.toLocaleString('ru-RU') + ' ₽'", cellStyle=drift_style)
-    for col in ["WB %", "Фикс. %"]:
-        if col in table.columns:
-            builder.configure_column(col, width=88, type=["numericColumn"], valueFormatter="x == null ? '' : x.toLocaleString('ru-RU') + ' %'")
+            builder.configure_column(col, width=142, type=["numericColumn"], valueFormatter="x == null ? '' : x.toLocaleString('ru-RU') + ' ₽'")
+    if "Отклонение" in table.columns:
+        builder.configure_column("Отклонение", width=130, type=["numericColumn"], valueFormatter="x == null ? '' : x.toLocaleString('ru-RU') + ' ₽'", cellStyle=drift_style)
     if "Статус" in table.columns:
-        builder.configure_column("Статус", width=105, cellStyle=status_style)
-    if "Причина" in table.columns:
-        builder.configure_column("Причина", width=160, tooltipField="Причина")
+        builder.configure_column("Статус", width=130, cellStyle=status_style)
     if "Комментарий" in table.columns:
-        builder.configure_column("Комментарий", width=330, tooltipField="Комментарий", flex=1)
+        builder.configure_column("Комментарий", width=520, minWidth=360, tooltipField="Комментарий")
 
     grid_response = AgGrid(
         table,
         gridOptions=builder.build(),
         update_mode=GridUpdateMode.SELECTION_CHANGED,
         theme="balham",
-        height=520,
+        height=540,
         allow_unsafe_jscode=True,
         fit_columns_on_grid_load=False,
-        key=f"repricer_grid_{key_suffix}",
+        key=f"repricer_grid_{key_suffix}_v2",
     )
-    selected = grid_response.get("selected_rows", [])
-    return selected if isinstance(selected, list) else []
+    return selected_rows_to_records(grid_response.get("selected_rows"))
 
 
 def render_apply_selected(selected_rows: list[dict[str, Any]], source_df: pd.DataFrame, key_suffix: str) -> None:
-    button_key = f"repricer_apply_fixed_{key_suffix}"
-    disabled_key = f"repricer_apply_disabled_{key_suffix}"
+    button_key = f"repricer_apply_fixed_{key_suffix}_v2"
+    disabled_key = f"repricer_apply_disabled_{key_suffix}_v2"
     if selected_rows:
         if st.button(f"Вернуть фиксированную цену ({len(selected_rows)} шт.)", type="primary", use_container_width=True, key=button_key):
             selected_ids = {int(row.get("nmID")) for row in selected_rows if row.get("nmID") is not None}
