@@ -194,18 +194,15 @@ def build_import_preview(uploaded_df: pd.DataFrame, current_df: pd.DataFrame):
     return changed_records, preview_rows, errors, ignored_columns
 
 
-st.set_page_config(page_title="Настройки товаров", page_icon="⚙️", layout="wide")
-st.title("⚙️ Настройки товаров и Price Lock")
-st.markdown(
-    """
-Здесь задаются себестоимость, минимальная/желаемая прибыль и жесткая цена WB.  
-Автоматически программа исправляет только отклонение от `locked_final_price`; все расчетные цены остаются рекомендациями в аналитике.
-"""
-)
+from utils.ui_theme import apply_fintech_theme, integer, money, render_header, render_metric_strip, section
 
-col_import, col_save, col_spacer = st.columns([1, 1, 3])
-with col_import:
-    if st.button("📥 Импорт из Wildberries", use_container_width=True):
+
+st.set_page_config(page_title="Настройки товаров", page_icon="⚙️", layout="wide")
+apply_fintech_theme()
+
+with st.sidebar:
+    st.markdown("### Действия")
+    if st.button("Импорт из Wildberries", use_container_width=True, key="settings_import_wb"):
         with st.spinner("Синхронизация карточек и текущих цен WB..."):
             success = APIClient.import_from_wb()
             if success:
@@ -214,13 +211,20 @@ with col_import:
                 st.rerun()
             else:
                 st.error("Ошибка импорта.")
+    st.caption("Редактирование параметров разбито на вкладки, чтобы таблица не превращалась в нечитаемый набор колонок.")
+
+render_header(
+    title="Настройки товаров и Price Lock",
+    subtitle="Здесь задаются себестоимость, минимальная/желаемая прибыль и жёсткая продавцовая цена WB. Автоматика исправляет только отклонение от locked_final_price.",
+    overline="Product settings",
+)
 
 items_data = APIClient.get_items()
 repricer_status = APIClient.get_repricer_status()
 status_map = {item["nm_id"]: item for item in repricer_status}
 
 if not items_data:
-    st.info("База пуста. Нажмите 'Импорт из Wildberries', чтобы загрузить товары.")
+    st.info("База пуста. Нажмите 'Импорт из Wildberries' в боковой панели, чтобы загрузить товары.")
     st.stop()
 
 df = pd.DataFrame(items_data)
@@ -236,110 +240,159 @@ active_items = int(df["is_active"].sum()) if "is_active" in df.columns else 0
 locked_items = int(df["price_lock_enabled"].sum()) if "price_lock_enabled" in df.columns else 0
 ready_items = int((df["auto_ready"] == "Да").sum())
 
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("Товаров", len(df))
-m2.metric("Активных", active_items)
-m3.metric("С Price Lock", locked_items)
-m4.metric("Готово к фиксации", ready_items)
-st.caption("Для фиксации цены товар должен быть активен, иметь включенный price_lock_enabled, locked_final_price и locked_discount.")
-
-st.subheader("📤 Импорт и экспорт")
-export_df = df[[col for col in EXPORT_COLUMNS if col in df.columns]].copy()
-export_col_csv, export_col_xlsx = st.columns(2)
-with export_col_csv:
-    st.download_button("⬇️ Скачать CSV", data=to_csv_bytes(export_df), file_name="wb_items_settings.csv", mime="text/csv", use_container_width=True)
-with export_col_xlsx:
-    st.download_button("⬇️ Скачать Excel", data=to_excel_bytes(export_df), file_name="wb_items_settings.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
-
-uploaded_file = st.file_uploader("Загрузите CSV или Excel для массового обновления параметров", type=["csv", "xlsx", "xls"])
-if uploaded_file is not None:
-    try:
-        uploaded_df = load_uploaded_table(uploaded_file)
-        changed_records, preview_rows, import_errors, ignored_columns = build_import_preview(uploaded_df, df)
-        if ignored_columns:
-            st.caption(f"Игнорируемые колонки: {', '.join(ignored_columns)}")
-        if import_errors:
-            st.warning(f"Найдено ошибок: {len(import_errors)}")
-            st.dataframe(pd.DataFrame(import_errors), use_container_width=True, hide_index=True)
-        if preview_rows:
-            st.success(f"Готово к обновлению: {len(changed_records)} товаров")
-            st.dataframe(pd.DataFrame(preview_rows), use_container_width=True, hide_index=True)
-            if st.button(f"📥 Применить импорт ({len(changed_records)} шт)", type="primary", use_container_width=True):
-                with st.spinner("Применяю импорт..."):
-                    result = APIClient.bulk_save_items(changed_records)
-                    if result:
-                        st.success(f"Импорт выполнен: всего {result.get('total', 0)}, создано {result.get('created', 0)}, обновлено {result.get('updated', 0)}.")
-                        time.sleep(1.2)
-                        st.rerun()
-        elif not import_errors:
-            st.info("В файле нет изменений относительно текущих данных.")
-    except Exception as exc:
-        st.error(f"Не удалось обработать файл: {exc}")
-
-st.subheader("📋 Редактор параметров")
-st.caption("Дважды кликните по ячейке, измените значение и нажмите 'Сохранить изменения'.")
-
-gb = GridOptionsBuilder.from_dataframe(df)
-gb.configure_default_column(resizable=True, filterable=True, sortable=True, editable=False)
-for col in ["photo_url", "updated_at"]:
-    if col in df.columns:
-        gb.configure_column(col, hide=True)
-
-gb.configure_column("nm_id", header_name="Артикул WB", pinned="left", width=115)
-gb.configure_column("name", header_name="Название", pinned="left", width=250)
-gb.configure_column("vendor_code", header_name="Артикул продавца", width=150, editable=True)
-
-# Экономика
-for col, label in {
-    "cost_price": "Себестоимость",
-    "min_profit_rub": "Мин. прибыль",
-    "desired_profit_rub": "Желаемая прибыль",
-    "logistics_cost": "План. логистика",
-    "return_cost_per_unit": "Возвраты / шт",
-    "ads_cost_per_unit": "Реклама / шт",
-    "overhead_per_unit": "Накладные / шт",
-    "wb_commission": "Комиссия WB",
-    "tax_rate": "Налог",
-}.items():
-    if col in df.columns:
-        gb.configure_column(col, header_name=label, editable=True, type=["numericColumn"])
-
-# Price Lock
-for col, label in {
-    "price_lock_enabled": "Price Lock",
-    "locked_final_price": "Фикс. цена клиента",
-    "locked_discount": "Фикс. скидка %",
-    "price_tolerance_rub": "Допуск ₽",
-    "pricing_strategy": "Стратегия",
-    "is_active": "Активен",
-}.items():
-    if col in df.columns:
-        gb.configure_column(col, header_name=label, editable=True)
-
-if "pricing_strategy" in df.columns:
-    gb.configure_column("pricing_strategy", cellEditor="agSelectCellEditor", cellEditorParams={"values": sorted(STRATEGY_VALUES)})
-if "repricer_mode" in df.columns:
-    gb.configure_column("repricer_mode", header_name="Legacy режим", editable=True, cellEditor="agSelectCellEditor", cellEditorParams={"values": sorted(MODE_VALUES)})
-
-for col, label in {"wb_price_base": "WB базовая", "wb_discount": "WB скидка", "wb_price_final": "WB цена", "auto_ready": "Готов", "auto_reason": "Комментарий"}.items():
-    if col in df.columns:
-        gb.configure_column(col, header_name=label, editable=False)
-
-grid_response = AgGrid(
-    df,
-    gridOptions=gb.build(),
-    data_return_mode=DataReturnMode.AS_INPUT,
-    update_mode=GridUpdateMode.MODEL_CHANGED,
-    fit_columns_on_grid_load=False,
-    theme="balham",
-    height=620,
+render_metric_strip(
+    [
+        {"label": "Товаров", "value": integer(len(df)), "note": "в базе"},
+        {"label": "Активных", "value": integer(active_items), "note": "участвуют в расчётах"},
+        {"label": "С Price Lock", "value": integer(locked_items), "note": "включена фиксация"},
+        {"label": "Готово", "value": integer(ready_items), "note": "есть цена и скидка"},
+        {"label": "Не готовы", "value": integer(max(len(df) - ready_items, 0)), "note": "требуют настройки"},
+    ]
 )
 
-with col_save:
-    if st.button("💾 Сохранить изменения", type="primary", use_container_width=True):
-        updated_df = grid_response["data"]
-        records = updated_df.to_dict(orient="records")
-        records = [{key: item.get(key) for key in persist_columns} for item in records]
+section("Импорт и экспорт", "CSV/Excel остаются для массового обновления параметров. Редактор ниже разбит на смысловые таблицы.")
+with st.expander("Открыть импорт / экспорт", expanded=False):
+    export_df = df[[col for col in EXPORT_COLUMNS if col in df.columns]].copy()
+    export_col_csv, export_col_xlsx = st.columns(2)
+    with export_col_csv:
+        st.download_button("Скачать CSV", data=to_csv_bytes(export_df), file_name="wb_items_settings.csv", mime="text/csv", use_container_width=True, key="settings_download_csv")
+    with export_col_xlsx:
+        st.download_button("Скачать Excel", data=to_excel_bytes(export_df), file_name="wb_items_settings.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True, key="settings_download_xlsx")
+
+    uploaded_file = st.file_uploader("Загрузите CSV или Excel для массового обновления параметров", type=["csv", "xlsx", "xls"], key="settings_upload_file")
+    if uploaded_file is not None:
+        try:
+            uploaded_df = load_uploaded_table(uploaded_file)
+            changed_records, preview_rows, import_errors, ignored_columns = build_import_preview(uploaded_df, df)
+            if ignored_columns:
+                st.caption(f"Игнорируемые колонки: {', '.join(ignored_columns)}")
+            if import_errors:
+                st.warning(f"Найдено ошибок: {len(import_errors)}")
+                st.dataframe(pd.DataFrame(import_errors), use_container_width=True, hide_index=True)
+            if preview_rows:
+                st.success(f"Готово к обновлению: {len(changed_records)} товаров")
+                st.dataframe(pd.DataFrame(preview_rows), use_container_width=True, hide_index=True)
+                if st.button(f"Применить импорт ({len(changed_records)} шт.)", type="primary", use_container_width=True, key="settings_apply_import"):
+                    with st.spinner("Применяю импорт..."):
+                        result = APIClient.bulk_save_items(changed_records)
+                        if result:
+                            st.success(f"Импорт выполнен: всего {result.get('total', 0)}, создано {result.get('created', 0)}, обновлено {result.get('updated', 0)}.")
+                            time.sleep(1.2)
+                            st.rerun()
+            elif not import_errors:
+                st.info("В файле нет изменений относительно текущих данных.")
+        except Exception as exc:
+            st.error(f"Не удалось обработать файл: {exc}")
+
+section("Редактор параметров", "Не выводим все поля в одной таблице. Настройки разделены на базовые данные, экономику, Price Lock и состояние WB.")
+
+EDIT_SETS = {
+    "Базовые": ["nm_id", "name", "vendor_code", "is_active"],
+    "Экономика": ["nm_id", "name", "cost_price", "logistics_cost", "return_cost_per_unit", "ads_cost_per_unit", "overhead_per_unit", "min_profit_rub", "desired_profit_rub", "wb_commission", "tax_rate"],
+    "Price Lock": ["nm_id", "name", "price_lock_enabled", "locked_final_price", "locked_discount", "price_tolerance_rub", "pricing_strategy", "repricer_mode", "auto_ready", "auto_reason"],
+    "WB состояние": ["nm_id", "name", "wb_price_base", "wb_discount", "wb_price_final", "target_discount", "min_price", "max_price", "auto_ready", "auto_reason"],
+}
+
+EDITABLE_BY_TAB = {
+    "Базовые": {"name", "vendor_code", "is_active"},
+    "Экономика": {"cost_price", "logistics_cost", "return_cost_per_unit", "ads_cost_per_unit", "overhead_per_unit", "min_profit_rub", "desired_profit_rub", "wb_commission", "tax_rate"},
+    "Price Lock": {"price_lock_enabled", "locked_final_price", "locked_discount", "price_tolerance_rub", "pricing_strategy", "repricer_mode"},
+    "WB состояние": {"target_discount", "min_price", "max_price"},
+}
+
+updated_frames: dict[str, pd.DataFrame] = {}
+
+def configure_grid(subset: pd.DataFrame, tab_key: str):
+    gb = GridOptionsBuilder.from_dataframe(subset)
+    gb.configure_default_column(resizable=True, filterable=True, sortable=True, editable=False, wrapHeaderText=True, autoHeaderHeight=True)
+    gb.configure_grid_options(rowHeight=42, headerHeight=44, enableCellTextSelection=True, ensureDomOrder=True, suppressHorizontalScroll=False)
+    gb.configure_column("nm_id", header_name="nmID", pinned="left", width=98, editable=False)
+    if "name" in subset.columns:
+        gb.configure_column("name", header_name="Товар", pinned="left", width=260, editable=True if tab_key == "basic" else False, tooltipField="name")
+    if "vendor_code" in subset.columns:
+        gb.configure_column("vendor_code", header_name="Артикул продавца", width=165, editable=True)
+    if "is_active" in subset.columns:
+        gb.configure_column("is_active", header_name="Активен", width=95, editable=True)
+
+    labels = {
+        "cost_price": "Себестоимость",
+        "logistics_cost": "План. логистика",
+        "return_cost_per_unit": "Возвраты / шт",
+        "ads_cost_per_unit": "Реклама / шт",
+        "overhead_per_unit": "Накладные / шт",
+        "min_profit_rub": "Мин. прибыль",
+        "desired_profit_rub": "Желаемая прибыль",
+        "wb_commission": "Комиссия WB",
+        "tax_rate": "Налог",
+        "locked_final_price": "Фикс. цена",
+        "locked_discount": "Фикс. скидка %",
+        "price_tolerance_rub": "Допуск ₽",
+        "pricing_strategy": "Стратегия",
+        "repricer_mode": "Legacy режим",
+        "price_lock_enabled": "Price Lock",
+        "wb_price_base": "WB база",
+        "wb_discount": "WB скидка",
+        "wb_price_final": "WB цена",
+        "target_discount": "Legacy скидка",
+        "min_price": "Legacy мин.",
+        "max_price": "Legacy макс.",
+        "auto_ready": "Готов",
+        "auto_reason": "Комментарий",
+    }
+    money_like = {"cost_price", "logistics_cost", "return_cost_per_unit", "ads_cost_per_unit", "overhead_per_unit", "min_profit_rub", "desired_profit_rub", "locked_final_price", "price_tolerance_rub", "wb_price_base", "wb_price_final", "min_price", "max_price"}
+    percent_like = {"wb_commission", "tax_rate", "locked_discount", "target_discount", "wb_discount"}
+
+    for col, label in labels.items():
+        if col not in subset.columns:
+            continue
+        editable = col not in {"wb_price_base", "wb_discount", "wb_price_final", "auto_ready", "auto_reason"}
+        width = 136
+        params = {"header_name": label, "width": width, "editable": editable}
+        if col in money_like:
+            params.update({"type": ["numericColumn"], "valueFormatter": "x == null ? '' : x.toLocaleString('ru-RU') + ' ₽'"})
+        if col in percent_like:
+            params.update({"type": ["numericColumn"], "valueFormatter": "x == null ? '' : x.toLocaleString('ru-RU') + ' %'"})
+        if col in {"pricing_strategy", "repricer_mode", "auto_reason"}:
+            params["width"] = 210 if col != "auto_reason" else 340
+            params["tooltipField"] = col
+        gb.configure_column(col, **params)
+
+    if "pricing_strategy" in subset.columns:
+        gb.configure_column("pricing_strategy", cellEditor="agSelectCellEditor", cellEditorParams={"values": sorted(STRATEGY_VALUES)})
+    if "repricer_mode" in subset.columns:
+        gb.configure_column("repricer_mode", cellEditor="agSelectCellEditor", cellEditorParams={"values": sorted(MODE_VALUES)})
+
+    response = AgGrid(
+        subset,
+        gridOptions=gb.build(),
+        data_return_mode=DataReturnMode.AS_INPUT,
+        update_mode=GridUpdateMode.MODEL_CHANGED,
+        fit_columns_on_grid_load=False,
+        theme="balham",
+        height=540,
+        key=f"settings_grid_{tab_key}",
+    )
+    return pd.DataFrame(response["data"])
+
+tabs = st.tabs(list(EDIT_SETS.keys()))
+for tab, (label, columns) in zip(tabs, EDIT_SETS.items()):
+    with tab:
+        available_columns = [col for col in columns if col in df.columns]
+        tab_df = df[available_columns].copy()
+        updated_frames[label] = configure_grid(tab_df, label.lower().replace(" ", "_"))
+
+save_col, info_col = st.columns([1, 4])
+with save_col:
+    if st.button("Сохранить изменения", type="primary", use_container_width=True, key="settings_save_all"):
+        merged_df = df.copy()
+        for label, frame in updated_frames.items():
+            if frame.empty or "nm_id" not in frame.columns:
+                continue
+            editable_cols = [col for col in frame.columns if col in EDITABLE_BY_TAB.get(label, set()) and col in persist_columns]
+            indexed_frame = frame.set_index("nm_id")
+            for col in editable_cols:
+                merged_df[col] = merged_df["nm_id"].map(indexed_frame[col]).where(merged_df["nm_id"].isin(indexed_frame.index), merged_df[col])
+        records = merged_df[persist_columns].to_dict(orient="records")
         with st.spinner("Сохраняю изменения..."):
             result = APIClient.bulk_save_items(records)
         if result:
@@ -348,3 +401,5 @@ with col_save:
             st.rerun()
         else:
             st.warning("Не удалось сохранить изменения. Проверьте логи.")
+with info_col:
+    st.markdown("<div class='side-panel-muted'>Для фиксации цены товар должен быть активен, иметь включенный Price Lock, locked_final_price и locked_discount. Экономические поля влияют только на аналитику и рекомендации.</div>", unsafe_allow_html=True)
