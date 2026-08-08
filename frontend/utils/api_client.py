@@ -11,10 +11,22 @@ class APIClient:
     """Класс для взаимодействия с backend через REST API."""
 
     @staticmethod
+    def _show_http_error(method: str, endpoint: str, response: requests.Response) -> None:
+        try:
+            payload = response.json()
+            detail = payload.get("detail", payload) if isinstance(payload, dict) else payload
+        except ValueError:
+            detail = response.text or response.reason
+
+        st.error(f"⚠️ Ошибка API ({method} {endpoint}): HTTP {response.status_code}: {detail}")
+
+    @staticmethod
     def _get(endpoint: str, params: Optional[Dict[str, Any]] = None, timeout: int = 20) -> Any:
         try:
             response = requests.get(f"{BACKEND_URL}{endpoint}", params=params, timeout=timeout)
-            response.raise_for_status()
+            if not response.ok:
+                APIClient._show_http_error("GET", endpoint, response)
+                return None
             return response.json()
         except requests.RequestException as exc:
             st.error(f"⚠️ Ошибка API (GET {endpoint}): {exc}")
@@ -29,7 +41,9 @@ class APIClient:
     ) -> Any:
         try:
             response = requests.post(f"{BACKEND_URL}{endpoint}", json=json_data, params=params, timeout=timeout)
-            response.raise_for_status()
+            if not response.ok:
+                APIClient._show_http_error("POST", endpoint, response)
+                return None
             return response.json()
         except requests.RequestException as exc:
             st.error(f"⚠️ Ошибка API (POST {endpoint}): {exc}")

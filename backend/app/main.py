@@ -66,9 +66,14 @@ def to_int(value: Any, default: int = 0) -> int:
     if value is None or value == "":
         return default
     try:
-        return int(float(value))
+        # reportId и rrdId могут быть большими целыми числами. Преобразование
+        # через float способно незаметно потерять младшие разряды.
+        return int(str(value).strip())
     except (TypeError, ValueError):
-        return default
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return default
 
 
 def parse_dt(value: Any) -> Optional[datetime]:
@@ -315,7 +320,7 @@ def build_finance_record_from_row(row: Dict[str, Any]) -> Optional[models.Financ
 
     return models.FinanceRecord(
         rrd_id=to_int(rrd_id),
-        report_id=to_int(pick(row, "realizationReportId", "realizationreport_id")),
+        report_id=to_int(pick(row, "reportId", "realizationReportId", "realizationreport_id")),
         nm_id=to_int(pick(row, "nmId", "nm_id"), default=None),
         srid=pick(row, "srid"),
         vendor_code=pick(row, "saName", "sa_name", "vendorCode"),
@@ -377,7 +382,7 @@ async def sync_finance(req: schemas.SyncRequest, db: AsyncSession = Depends(data
     try:
         report_data = wb_client.wb.get_financial_report(date_from, date_to)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=502, detail=f"Ошибка WB API: {exc}")
 
     if not report_data:
         return {"status": "warning", "message": "Данных нет", "new_records": 0, "total_found": 0}
@@ -391,7 +396,7 @@ async def sync_finance(req: schemas.SyncRequest, db: AsyncSession = Depends(data
 
         db.add(
             models.FinanceRawRow(
-                source_api_version="finance_v1_or_legacy",
+                source_api_version="finance_v1",
                 report_id=record.report_id,
                 rrd_id=record.rrd_id,
                 nm_id=record.nm_id,
@@ -408,7 +413,12 @@ async def sync_finance(req: schemas.SyncRequest, db: AsyncSession = Depends(data
         db.add(record)
         new_records += 1
 
-    await db.commit()
+    try:
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=f"Ошибка сохранения финансового отчёта в БД: {exc}")
+
     return {"status": "success", "new_records": new_records, "raw_rows": raw_rows, "total_found": len(report_data), "date_from": date_from, "date_to": date_to}
 
 

@@ -13,64 +13,8 @@ class WBClient:
     """Минимальный клиент WB API.
 
     Важно: финансовый отчет загружается через новый finance/v1 API.
-    Старый /api/v5/supplier/reportDetailByPeriod оставлен только как fallback.
+    Старый /api/v5/supplier/reportDetailByPeriod больше не используется.
     """
-
-    FINANCE_FIELDS = [
-        "realizationReportId",
-        "rrdId",
-        "subjectName",
-        "nmId",
-        "brandName",
-        "saName",
-        "barcode",
-        "srid",
-        "dateFrom",
-        "dateTo",
-        "createDt",
-        "orderDt",
-        "saleDt",
-        "rrDt",
-        "docTypeName",
-        "supplierOperName",
-        "quantity",
-        "retailPrice",
-        "retailAmount",
-        "retailPriceWithdiscRub",
-        "salePercent",
-        "commissionPercent",
-        "ppvzSalesCommission",
-        "ppvzForPay",
-        "forPay",
-        "ppvzReward",
-        "acquiringFee",
-        "acquiringPercent",
-        "deliveryAmount",
-        "returnAmount",
-        "deliveryRub",
-        "deliveryService",
-        "rebillLogisticCost",
-        "storageFee",
-        "paidStorage",
-        "deduction",
-        "acceptance",
-        "paidAcceptance",
-        "penalty",
-        "additionalPayment",
-        "supplierPromo",
-        "productDiscountForReport",
-        "sellerPromoDiscount",
-        "loyaltyDiscount",
-        "cashbackAmount",
-        "cashbackDiscount",
-        "wibesWbDiscountPercent",
-        "salePricePromocodeDiscountPrc",
-        "salePriceWholesaleDiscountPrc",
-        "officeName",
-        "warehouseName",
-        "siteCountry",
-        "deliveryMethod",
-    ]
 
     def __init__(self):
         self.token = os.getenv("WB_API_TOKEN")
@@ -98,6 +42,20 @@ class WBClient:
                     continue
                 if response.status_code == 401:
                     raise RuntimeError("WB API token is invalid or expired")
+
+                if response.status_code == 403:
+                    raise RuntimeError(
+                        "WB API denied access. Check that the token has access to the required API category"
+                    )
+
+                if 400 <= response.status_code < 500:
+                    try:
+                        error_body = response.json()
+                    except ValueError:
+                        error_body = response.text
+                    raise RuntimeError(
+                        f"WB API returned HTTP {response.status_code}: {error_body}"
+                    )
 
                 response.raise_for_status()
             except requests.exceptions.RequestException as exc:
@@ -137,17 +95,12 @@ class WBClient:
     def get_financial_report(self, date_from: str, date_to: str) -> List[dict]:
         """Загружает детализированный финансовый отчет через новый finance/v1 API.
 
-        Пагинация идет по rrdId. Если новый метод недоступен, используется legacy fallback.
+        Пагинация идет по rrdId до ответа HTTP 204.
         """
-
-        try:
-            return self.get_financial_report_v1(date_from, date_to)
-        except Exception as exc:
-            logger.warning("finance/v1 report failed, fallback to v5: %s", exc)
-            return self.get_financial_report_legacy(date_from, date_to)
+        return self.get_financial_report_v1(date_from, date_to)
 
     def get_financial_report_v1(self, date_from: str, date_to: str) -> List[dict]:
-        url = "https://statistics-api.wildberries.ru/api/finance/v1/sales-reports/detailed"
+        url = "https://finance-api.wildberries.ru/api/finance/v1/sales-reports/detailed"
         all_rows: List[dict] = []
         rrd_id = 0
 
@@ -158,7 +111,9 @@ class WBClient:
                 "limit": 100000,
                 "rrdId": rrd_id,
                 "period": "daily",
-                "fields": self.FINANCE_FIELDS,
+                # fields намеренно не передаём: по протоколу WB в этом случае
+                # возвращаются все поля отчёта. Это устойчивее к изменениям
+                # состава финансового отчёта и сохраняет полный raw_json.
             }
             print(f"💰 Запрос финансов finance/v1: {date_from} — {date_to}, rrdId={rrd_id}")
             chunk = self._make_request("POST", url, json=payload)
@@ -180,34 +135,6 @@ class WBClient:
             if not next_rrd_id or next_rrd_id == rrd_id:
                 break
             rrd_id = next_rrd_id
-
-            # защита от случайного бесконечного цикла
-            if len(rows) < 100000:
-                break
-
-        return all_rows
-
-    def get_financial_report_legacy(self, date_from: str, date_to: str) -> List[dict]:
-        url = "https://statistics-api.wildberries.ru/api/v5/supplier/reportDetailByPeriod"
-        all_rows: List[dict] = []
-        rrd_id = 0
-
-        while True:
-            params = {"dateFrom": date_from, "dateTo": date_to, "rrdid": rrd_id, "limit": 100000}
-            print(f"💰 Legacy V5 finance: {date_from} — {date_to}, rrdid={rrd_id}")
-            chunk = self._make_request("GET", url, params=params)
-            if chunk is None:
-                break
-            rows = chunk if isinstance(chunk, list) else []
-            if not rows:
-                break
-            all_rows.extend(rows)
-            next_rrd_id = self._extract_last_rrd_id(rows)
-            if not next_rrd_id or next_rrd_id == rrd_id:
-                break
-            rrd_id = next_rrd_id
-            if len(rows) < 100000:
-                break
 
         return all_rows
 
